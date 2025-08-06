@@ -13,14 +13,33 @@ class KMSService:
     def decrypt_session_keys(self, encrypted_data):
         """Decrypt session keys using AWS KMS"""
         try:
+            logger.info(f"Attempting to decrypt session keys with key_id: {self.key_id}")
+            logger.debug(f"Encrypted data length: {len(encrypted_data)}")
+            logger.debug(f"Encrypted data preview: {encrypted_data[:50]}...")
+            
+            # Decode base64
+            ciphertext_blob = base64.b64decode(encrypted_data)
+            logger.debug(f"Ciphertext blob length: {len(ciphertext_blob)}")
+            
             response = self.kms_client.decrypt(
-                CiphertextBlob=base64.b64decode(encrypted_data),
+                CiphertextBlob=ciphertext_blob,
                 KeyId=self.key_id
             )
-            decrypted_data = json.loads(response["Plaintext"].decode("utf-8"))
+            
+            logger.debug(f"KMS response received, plaintext length: {len(response['Plaintext'])}")
+            
+            # Decode the plaintext
+            plaintext_str = response["Plaintext"].decode("utf-8")
+            logger.debug(f"Plaintext string: {plaintext_str}")
+            
+            # Parse JSON
+            decrypted_data = json.loads(plaintext_str)
+            logger.info(f"Successfully decrypted session keys for public key: {decrypted_data.get('apiPublicKey', 'N/A')[:20]}...")
+            
             return decrypted_data["apiPublicKey"], decrypted_data["apiPrivateKey"]
         except Exception as e:
             logger.error(f"KMS decryption failed: {str(e)}")
+            logger.error(f"Exception type: {type(e).__name__}")
             raise ValueError(f"KMS decryption failed: {str(e)}")
 
     def test_connection(self):

@@ -1,0 +1,101 @@
+{
+  "id": "01988159-9926-7371-b6dc-f7d748f8b0f5",
+  "fingerprint": "sha256:6d0e0d6121297c2ff4e5f2adc7ce9651dd2447d3a8368ea60e72d17c5cb53aa7",
+  "voteList": [
+    {
+      "id": "a25de58f-03af-4c96-92e6-6e3066291275",
+      "userId": "cfbb7c19-7692-4b30-83f1-c26338e8eb5b",
+      "user": {
+        "userId": "cfbb7c19-7692-4b30-83f1-c26338e8eb5b",
+        "userName": "User-5014800072",
+        "userEmail": "bpeterscqa@gmail.com",
+        "authenticators": [],
+        "apiKeys": [
+          {
+            "credential": {
+              "publicKey": "025e8bb7871c900f2742057159665da4a6d09054f64d3ee47bdc61f5f2a1849fb8",
+              "type": "CREDENTIAL_TYPE_READ_WRITE_SESSION_KEY_P256"
+            },
+            "apiKeyId": "c8c0da6e-305d-447e-918a-e0bbd3e3064d",
+            "apiKeyName": "Read Write Session - 2025-08-06 21:46:29",
+            "createdAt": {
+              "seconds": "1754516789",
+              "nanos": "0"
+            },
+            "updatedAt": {
+              "seconds": "1754516789",
+              "nanos": "0"
+            },
+            "expirationSeconds": "7776000"
+          },
+          {
+            "credential": {
+              "publicKey": "023dca6fc4a0b275e19c1c6caac0c6ce8efb70461ffe6a1e360d10b725794811e3",
+              "type": "CREDENTIAL_TYPE_API_KEY_P256"
+            },
+            "apiKeyId": "113b50a8-71a3-48ca-8bea-b9d7e9f6fc97",
+            "apiKeyName": "User-5014800072-APIKey",
+            "createdAt": {
+              "seconds": "1753850840",
+              "nanos": "0"
+            },
+            "updatedAt": {
+              "seconds": "1753850840",
+              "nanos": "0"
+            }
+          }
+        ],
+        "userTags": [],
+        "oauthProviders": [],
+        "createdAt": {
+          "seconds": "1753850840",
+          "nanos": "0"
+        },
+        "updatedAt": {
+          "seconds": "1753850840",
+          "nanos": "0"
+        }
+      },
+      "activityId": "01988159-9926-7371-b6dc-f7d748f8b0f5",
+      "selection": "VOTE_SELECTION_APPROVED",
+      "message": "{\"email\":\"bpeterscqa@gmail.com\",\"organizationId\":\"885d7896-de83-4248-8eb0-f94819236204\",\"parameters\":{\"apiKeyName\":\"Read Write Session - 2025-08-06 21:46:29\",\"expirationSeconds\":\"7776000\",\"invalidateExisting\":true,\"targetPublicKey\":\"04bf904a49f422088222c8448c0422fff3385c8352c896b34ed3b26ba195d9f4d3ef9d1c162d1accfd289554e4d59e3161b386136820969b56c1479c5e3f0177f8\",\"userId\":\"cfbb7c19-7692-4b30-83f1-c26338e8eb5b\"},\"timestampMs\":\"1754516789315\",\"type\":\"ACTIVITY_TYPE_CREATE_READ_WRITE_SESSION_V2\"}",
+      "publicKey": "023dca6fc4a0b275e19c1c6caac0c6ce8efb70461ffe6a1e360d10b725794811e3",
+      "signature": "30440220348ae692a971a33457b2d9249067e61faf96c6db94aebcfbdd92c633bf591dba022071bca0bc3e2bf9be49fbfaeea11a04d72877fcac46ffab92ae16cf86059e0fac",
+      "scheme": "SIGNATURE_SCHEME_TK_API_P256",
+      "createdAt": {
+        "seconds": "1754516789",
+        "nanos": "0"
+      }
+    }
+  ],
+  "permission": {
+    "canApprove": true,
+    "canReject": true
+  },
+  "createdAt": {
+    "seconds": "1754516789",
+    "nanos": "0"
+  },
+  "updatedAt": {
+    "seconds": "1754516789",
+    "nanos": "0"
+  },
+  "status": "ACTIVITY_STATUS_COMPLETED",
+  "failure": null,
+  "type": "ACTIVITY_TYPE_CREATE_READ_WRITE_SESSION_V2",
+  "intent": {
+    "targetPublicKey": "04bf904a49f422088222c8448c0422fff3385c8352c896b34ed3b26ba195d9f4d3ef9d1c162d1accfd289554e4d59e3161b386136820969b56c1479c5e3f0177f8",
+    "userId": "cfbb7c19-7692-4b30-83f1-c26338e8eb5b",
+    "apiKeyName": "Read Write Session - 2025-08-06 21:46:29",
+    "expirationSeconds": "7776000",
+    "invalidateExisting": true
+  },
+  "result": {
+    "organizationId": "885d7896-de83-4248-8eb0-f94819236204",
+    "organizationName": "User-5014800072",
+    "userId": "cfbb7c19-7692-4b30-83f1-c26338e8eb5b",
+    "username": "User-5014800072",
+    "apiKeyId": "c8c0da6e-305d-447e-918a-e0bbd3e3064d",
+    "credentialBundle": "zEAwEJMc6jY3htnTXz3NBUdh7sNM4kzp9qWSXrxJUfRcmu3Ykub4jiUTAgStzanBrq9yfP7rSHJTDca1iSEN13rsoZKjRQJL3B3UFmoakDaoioCQy8P"
+  }
+}
