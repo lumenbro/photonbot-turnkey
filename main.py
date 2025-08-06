@@ -1,4 +1,5 @@
 # main.py (modified for single DB, Turnkey integration, session-based signing)
+from services.kms_service import KMSService
 import asyncio
 import asyncpg
 from aiogram import Bot, Dispatcher
@@ -103,7 +104,7 @@ class TurnkeySigner:
 
                 # Fetch temp session keys directly from DB (Node.js already decrypted and stored them)
                 session_data = await conn.fetchrow(
-                    "SELECT temp_api_public_key, temp_api_private_key, session_expiry FROM users WHERE telegram_id = $1",
+                    "SELECT kms_encrypted_session_key, kms_key_id, session_expiry FROM users WHERE telegram_id = $1",
                     int(telegram_id)
                 )
                 if not session_data:
@@ -118,8 +119,8 @@ class TurnkeySigner:
                     raise ValueError(f"Session expired for telegram_id {telegram_id}. Recreate session via Node.js backend.")
                 
                 temp_public = session_data["temp_api_public_key"]
-                temp_private = session_data["temp_api_private_key"]
-
+# Decrypt session keys using KMS
+temp_public, temp_private = self.app_context.kms_service.decrypt_session_keys(session_data["kms_encrypted_session_key"])
         try:
             tx_envelope = TransactionEnvelope.from_xdr(transaction_xdr, Network.PUBLIC_NETWORK_PASSPHRASE)  # Adjust network if mainnet
         except Exception as e:
@@ -208,6 +209,8 @@ async def init_db_pool():
                 temp_api_public_key TEXT,
                 temp_api_private_key TEXT,
                 session_expiry TIMESTAMP,
+kms_encrypted_session_key TEXT,
+kms_key_id TEXT,
                 user_email TEXT           
             );
             CREATE TABLE IF NOT EXISTS turnkey_wallets (
@@ -362,6 +365,7 @@ async def run_master():
 
     app_context.turnkey_signer = TurnkeySigner(app_context)
 
+app_context.kms_service = KMSService()
     async def wrapped_sign_transaction(telegram_id, transaction_xdr):
         return await app_context.turnkey_signer.sign_transaction(telegram_id, transaction_xdr)
     app_context.sign_transaction = wrapped_sign_transaction
