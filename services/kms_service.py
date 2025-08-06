@@ -2,6 +2,7 @@ import boto3
 import base64
 import json
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,14 @@ class KMSService:
             ciphertext_blob = base64.b64decode(encrypted_data)
             logger.debug(f"Ciphertext blob length: {len(ciphertext_blob)}")
             
+            # Use the same encryption context as the Node.js service
             response = self.kms_client.decrypt(
                 CiphertextBlob=ciphertext_blob,
-                KeyId=self.key_id
+                KeyId=self.key_id,
+                EncryptionContext={
+                    'Service': 'lumenbro-session-keys',
+                    'Environment': os.getenv('NODE_ENV', 'development')
+                }
             )
             
             logger.debug(f"KMS response received, plaintext length: {len(response['Plaintext'])}")

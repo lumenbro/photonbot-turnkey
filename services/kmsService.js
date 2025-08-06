@@ -8,7 +8,7 @@ class KMSService {
 
     async encryptSessionKeys(apiPublicKey, apiPrivateKey) {
         try {
-            // Create a JSON object with the session keys
+            // Create a JSON object with the session keys using the field names Python expects
             const sessionData = {
                 apiPublicKey: apiPublicKey,
                 apiPrivateKey: apiPrivateKey
@@ -17,10 +17,14 @@ class KMSService {
             // Convert to JSON string and then to Buffer
             const plaintext = Buffer.from(JSON.stringify(sessionData), 'utf-8');
 
-            // Encrypt using KMS
+            // Encrypt using KMS with encryption context
             const params = {
                 KeyId: this.keyId,
-                Plaintext: plaintext
+                Plaintext: plaintext,
+                EncryptionContext: {
+                    'Service': 'lumenbro-session-keys',
+                    'Environment': process.env.NODE_ENV || 'development'
+                }
             };
 
             const result = await this.kms.encrypt(params).promise();
@@ -41,10 +45,14 @@ class KMSService {
             // Decode base64 encrypted data
             const ciphertextBlob = Buffer.from(encryptedData, 'base64');
 
-            // Decrypt using KMS
+            // Decrypt using KMS with encryption context
             const params = {
                 CiphertextBlob: ciphertextBlob,
-                KeyId: this.keyId
+                KeyId: this.keyId,
+                EncryptionContext: {
+                    'Service': 'lumenbro-session-keys',
+                    'Environment': process.env.NODE_ENV || 'development'
+                }
             };
 
             const result = await this.kms.decrypt(params).promise();
