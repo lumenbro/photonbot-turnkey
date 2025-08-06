@@ -227,8 +227,20 @@ async def init_db_pool():
                 session_expiry TIMESTAMP,
                 kms_encrypted_session_key TEXT,
                 kms_key_id TEXT,
-                user_email TEXT           
+                user_email TEXT,
+                session_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+            
+            -- Add session_created_at column if it doesn't exist (for existing tables)
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'session_created_at'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN session_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+                END IF;
+            END $$;
             CREATE TABLE IF NOT EXISTS turnkey_wallets (
                 id BIGSERIAL PRIMARY KEY,
                 telegram_id BIGINT REFERENCES users(telegram_id) ON DELETE CASCADE,

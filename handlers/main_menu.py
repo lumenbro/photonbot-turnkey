@@ -507,7 +507,8 @@ async def logout_command(message: types.Message, app_context):
                 temp_api_private_key = NULL,
                 kms_encrypted_session_key = NULL,
                 kms_key_id = NULL,
-                session_expiry = NULL
+                session_expiry = NULL,
+                session_created_at = NULL
             WHERE telegram_id = $1
         """, telegram_id)
         
@@ -517,7 +518,8 @@ async def logout_command(message: types.Message, app_context):
                 turnkey_session_id,
                 temp_api_public_key,
                 kms_encrypted_session_key,
-                session_expiry
+                session_expiry,
+                session_created_at
             FROM users WHERE telegram_id = $1
         """, telegram_id)
         
