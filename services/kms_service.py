@@ -28,7 +28,7 @@ class KMSService:
                 KeyId=self.key_id,
                 EncryptionContext={
                     'Service': 'lumenbro-session-keys',
-                    'Environment': os.getenv('NODE_ENV', 'development')
+                    'Environment': 'production'  # Fixed to match Node.js server
                 }
             )
             
