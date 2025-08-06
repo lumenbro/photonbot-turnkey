@@ -487,6 +487,52 @@ async def process_email(message: types.Message, state: FSMContext, app_context):
     await message.reply("Tap to set up secure passkey:", reply_markup=keyboard)
     await state.clear()  # Continue after in separate callback
 
+async def logout_command(message: types.Message, app_context):
+    """Clear session data from database to force re-login"""
+    telegram_id = message.from_user.id
+    logger.info(f"Logout command: from_user.id={telegram_id}")
+    
+    async with app_context.db_pool.acquire() as conn:
+        # Check if user exists
+        exists = await conn.fetchval("SELECT telegram_id FROM users WHERE telegram_id = $1", telegram_id)
+        if not exists:
+            await message.reply("No wallet registered. Use /register to get started.")
+            return
+        
+        # Clear both legacy and KMS session data
+        await conn.execute("""
+            UPDATE users SET 
+                turnkey_session_id = NULL,
+                temp_api_public_key = NULL,
+                temp_api_private_key = NULL,
+                kms_encrypted_session_key = NULL,
+                kms_key_id = NULL,
+                session_expiry = NULL
+            WHERE telegram_id = $1
+        """, telegram_id)
+        
+        # Verify the update
+        session_data = await conn.fetchrow("""
+            SELECT 
+                turnkey_session_id,
+                temp_api_public_key,
+                kms_encrypted_session_key,
+                session_expiry
+            FROM users WHERE telegram_id = $1
+        """, telegram_id)
+        
+        if session_data and all(v is None for v in session_data.values()):
+            await message.reply(
+                "✅ Session cleared successfully!\n\n"
+                "Your session keys have been removed from the database. "
+                "You'll need to log in again to perform transactions.\n\n"
+                "Use /login to establish a new session."
+            )
+            logger.info(f"Session cleared for user {telegram_id}")
+        else:
+            await message.reply("❌ Failed to clear session. Please try again.")
+            logger.error(f"Failed to clear session for user {telegram_id}")
+
 async def login_command(message: types.Message, app_context):
     telegram_id = message.from_user.id
     async with app_context.db_pool.acquire() as conn:
@@ -1238,3 +1284,7 @@ def register_main_handlers(dp, app_context, streaming_service):
     async def login_handler(message: types.Message):
         await login_command(message, app_context)
     dp.message.register(login_handler, Command("login"))
+
+    async def logout_handler(message: types.Message):
+        await logout_command(message, app_context)
+    dp.message.register(logout_handler, Command("logout"))

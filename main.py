@@ -102,9 +102,17 @@ class TurnkeySigner:
                 sign_with = wallet_data["public_key"]  # Use address for signWith
                 public_key = wallet_data["public_key"]
 
-                # Fetch encrypted session keys from DB
+                # Try KMS format first, fall back to legacy format
                 session_data = await conn.fetchrow(
-                    "SELECT kms_encrypted_session_key, kms_key_id, session_expiry FROM users WHERE telegram_id = $1",
+                    """
+                    SELECT 
+                        kms_encrypted_session_key,
+                        kms_key_id,
+                        temp_api_public_key,
+                        temp_api_private_key,
+                        session_expiry 
+                    FROM users WHERE telegram_id = $1
+                    """,
                     int(telegram_id)
                 )
                 if not session_data:
@@ -118,8 +126,16 @@ class TurnkeySigner:
                 if session_expiry < datetime.now(timezone.utc):
                     raise ValueError(f"Session expired for telegram_id {telegram_id}. Recreate session via Node.js backend.")
                 
-                # Decrypt session keys using KMS
-                temp_public, temp_private = self.app_context.kms_service.decrypt_session_keys(session_data["kms_encrypted_session_key"])
+                # Check if KMS session exists, otherwise use legacy
+                if session_data["kms_encrypted_session_key"] and session_data["kms_key_id"]:
+                    logger.info(f"Using KMS session for telegram_id {telegram_id}")
+                    # Decrypt session keys using KMS
+                    temp_public, temp_private = self.app_context.kms_service.decrypt_session_keys(session_data["kms_encrypted_session_key"])
+                else:
+                    logger.info(f"Using legacy session for telegram_id {telegram_id}")
+                    # Use legacy unencrypted session keys
+                    temp_public = session_data["temp_api_public_key"]
+                    temp_private = session_data["temp_api_private_key"]
 
         try:
             tx_envelope = TransactionEnvelope.from_xdr(transaction_xdr, Network.PUBLIC_NETWORK_PASSPHRASE)  # Adjust network if mainnet
