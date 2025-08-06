@@ -27,7 +27,7 @@ class KMSService:
         """Test KMS connection and key access"""
         try:
             response = self.kms_client.describe_key(KeyId=self.key_id)
-            logger.info(f"KMS connection successful. Key: {response[\"KeyMetadata\"][\"KeyId\"]}")
+            logger.info(f"KMS connection successful. Key: {response['KeyMetadata']['KeyId']}")
             return True
         except Exception as e:
             logger.error(f"KMS connection failed: {str(e)}")
