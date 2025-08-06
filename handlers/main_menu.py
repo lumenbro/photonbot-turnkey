@@ -547,8 +547,14 @@ async def login_command(message: types.Message, app_context):
             return
         sub_org_id = row['turnkey_sub_org_id']
         email = (await conn.fetchval("SELECT user_email FROM users WHERE telegram_id = $1", telegram_id)) or "unknown@lumenbro.com"
-    login_url = f"https://lumenbro.com/login?orgId={sub_org_id}&email={email}"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Establish Session", url=login_url)]])
+    
+    # Use mini-app approach like walletmanagement.py
+    mini_app_base = "https://lumenbro.com/mini-app/index.html"
+    login_url = f"{mini_app_base}?action=login&orgId={sub_org_id}&email={email}"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Establish Session", web_app=WebAppInfo(url=login_url))
+    ]])
     await message.reply("Open to login/establish session:", reply_markup=keyboard)
 
 async def unregister_command(message: types.Message, app_context, streaming_service: StreamingService):

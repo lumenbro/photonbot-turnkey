@@ -57,6 +57,7 @@ async def get_wallet_management_menu(telegram_id, app_context):
         [InlineKeyboardButton(text="Login (Establish Session)", web_app=WebAppInfo(url=login_url))],
         [InlineKeyboardButton(text="Recovery (Lost Device/Passkey)", web_app=WebAppInfo(url=recovery_url))],
         [InlineKeyboardButton(text="Check API Keys (Debug)", web_app=WebAppInfo(url=check_keys_url))],  # New button
+        [InlineKeyboardButton(text="Logout (Clear Session)", callback_data="logout")],  # New logout button
         [InlineKeyboardButton(text="Back to Main Menu", callback_data="main_menu")]
     ]), menu_text
 
@@ -73,6 +74,55 @@ async def process_wallet_management_callback(callback: types.CallbackQuery, app_
 
 async def process_main_menu_callback(callback: types.CallbackQuery):
     await callback.message.reply(welcome_text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+    await callback.answer()
+
+async def process_logout_callback(callback: types.CallbackQuery, app_context):
+    """Handle logout callback from wallet management menu"""
+    telegram_id = callback.from_user.id
+    logger.info(f"Processing logout for telegram_id: {telegram_id}")
+    
+    try:
+        async with app_context.db_pool.acquire() as conn:
+            # Clear all session-related fields
+            await conn.execute("""
+                UPDATE users SET 
+                    turnkey_session_id = NULL,
+                    temp_api_public_key = NULL,
+                    temp_api_private_key = NULL,
+                    kms_encrypted_session_key = NULL,
+                    kms_key_id = NULL,
+                    session_expiry = NULL,
+                    session_created_at = NULL
+                WHERE telegram_id = $1
+            """, telegram_id)
+            
+            # Verify the update
+            result = await conn.fetchrow("""
+                SELECT turnkey_session_id, temp_api_public_key, temp_api_private_key, 
+                       kms_encrypted_session_key, kms_key_id, session_expiry, session_created_at
+                FROM users WHERE telegram_id = $1
+            """, telegram_id)
+            
+            if result:
+                # Check if all session fields are cleared
+                session_cleared = all(
+                    result[field] is None for field in [
+                        'turnkey_session_id', 'temp_api_public_key', 'temp_api_private_key',
+                        'kms_encrypted_session_key', 'kms_key_id', 'session_expiry', 'session_created_at'
+                    ]
+                )
+                
+                if session_cleared:
+                    await callback.message.reply("✅ Session cleared successfully. You can now use /login to establish a new session.")
+                else:
+                    await callback.message.reply("⚠️ Session partially cleared. Some fields may still exist.")
+            else:
+                await callback.message.reply("❌ User not found in database.")
+                
+    except Exception as e:
+        logger.error(f"Error during logout for telegram_id {telegram_id}: {str(e)}")
+        await callback.message.reply("❌ Error clearing session. Please try again.")
+    
     await callback.answer()
 
 # Placeholder for future features like import/export wallets
@@ -97,6 +147,7 @@ def register_wallet_management_handlers(dp, app_context):
     
     dp.callback_query.register(lambda c: process_wallet_management_callback(c, app_context), lambda c: c.data == "wallet_management")
     dp.callback_query.register(lambda c: process_main_menu_callback(c), lambda c: c.data == "main_menu")
+    dp.callback_query.register(lambda c: process_logout_callback(c, app_context), lambda c: c.data == "logout")
     
     # Placeholder registrations for future features
     dp.message.register(lambda m: import_wallet(m, app_context), Command("import_wallet"))
