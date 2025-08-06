@@ -1,0 +1,6 @@
+aiogram==3.18.0
+stellar-sdk[aiohttp]==12.2.0
+cryptography==44.0.1
+python-dotenv==1.0.1
+asyncpg==0.30.0
+PyJWT>=2.8.0
