@@ -192,7 +192,7 @@ async def start_command(message: types.Message, app_context, streaming_service: 
             return
         elif not exists:
             # User needs to register first; redirect to registration
-            await message.reply("You’re not registered yet. Let’s get you set up as a founder. Use /register to proceed.")
+            await message.reply("You're not registered yet. Let's get you set up as a founder. Use /register to proceed.")
             await state.update_data(founder_signup=True)
             logger.info(f"Set founder_signup=True in state for user {telegram_id}")
             return
@@ -221,17 +221,259 @@ async def start_command(message: types.Message, app_context, streaming_service: 
     else:
         logger.info("No parameter or unrecognized parameter provided with /start command")
 
-    # Existing logic for registered users
+    # Check if user exists and if they are a legacy migrated user
     async with app_context.db_pool.acquire() as conn:
-        exists = await conn.fetchval("SELECT telegram_id FROM users WHERE telegram_id = $1", telegram_id)
-    if not exists and message.from_user.is_bot:
+        user_data = await conn.fetchrow("""
+            SELECT telegram_id, source_old_db, encrypted_s_address_secret, pioneer_status, 
+                   migration_notified, public_key
+            FROM users WHERE telegram_id = $1
+        """, telegram_id)
+        
+    if not user_data and message.from_user.is_bot:
         logger.info(f"Ignoring start command from bot itself for telegram_id {telegram_id}")
         return
-    elif not exists:
-        await message.reply("You’re not registered yet. Use /register to get started.")
+    elif not user_data:
+        await message.reply("You're not registered yet. Use /register to get started.")
     else:
-        welcome_text = await generate_welcome_message(telegram_id, app_context)
-        await message.reply(welcome_text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        # Check if this is a legacy migrated user
+        if user_data['source_old_db'] and user_data['encrypted_s_address_secret']:
+            # This is a legacy migrated user
+            logger.info(f"Legacy migrated user detected: {telegram_id}")
+            
+            # Check if they've been notified about migration
+            if not user_data['migration_notified']:
+                # Show migration notification with export option
+                await show_migration_notification(message, user_data, app_context)
+            else:
+                # Show normal welcome message
+                welcome_text = await generate_welcome_message(telegram_id, app_context)
+                await message.reply(welcome_text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        else:
+            # Regular user (not migrated)
+            welcome_text = await generate_welcome_message(telegram_id, app_context)
+            await message.reply(welcome_text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+
+async def show_migration_notification(message: types.Message, user_data, app_context):
+    """Show migration notification to legacy users with export option"""
+    telegram_id = user_data['telegram_id']
+    pioneer_status = "👑 Pioneer" if user_data['pioneer_status'] else "Regular User"
+    
+    notification_text = f"""🔔 **Important: Your Old Wallet is Being Retired**
+
+Hello! We've upgraded our system to be more secure. Your old wallet data has been safely migrated.
+
+**Your Status:**
+• {pioneer_status}
+• Public Key: `{user_data['public_key']}`
+
+**What You Need to Know:**
+⚠️ **Your old wallet will be retired** - it won't work with the new bot
+✅ Your funds are safe and accessible
+📱 **You need to register for a new Turnkey wallet** to continue using the bot
+
+**Next Steps:**
+1. Export your old wallet keys (for fund management)
+2. Register for a new Turnkey wallet to continue trading
+3. Transfer funds from old wallet to new wallet (optional)
+
+Would you like to export your old wallet keys now?"""
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Export Old Wallet Keys", callback_data="export_legacy_wallet")],
+        [InlineKeyboardButton(text="📱 Register New Turnkey Wallet", callback_data="register_new_wallet")],
+        [InlineKeyboardButton(text="⏰ Later", callback_data="migration_notified_later")],
+        [InlineKeyboardButton(text="❓ Help", callback_data="migration_help")]
+    ])
+    
+    await message.reply(notification_text, reply_markup=keyboard, parse_mode="Markdown")
+
+async def process_migration_export(callback: types.CallbackQuery, app_context):
+    """Handle legacy wallet export from migration notification"""
+    telegram_id = callback.from_user.id
+    logger.info(f"Processing legacy wallet export for user {telegram_id}")
+    
+    try:
+        # Get user's encrypted S-address secret
+        async with app_context.db_pool.acquire() as conn:
+            user_data = await conn.fetchrow("""
+                SELECT encrypted_s_address_secret, public_key, pioneer_status
+                FROM users WHERE telegram_id = $1
+            """, telegram_id)
+            
+            if not user_data or not user_data['encrypted_s_address_secret']:
+                await callback.message.reply("❌ No wallet data found for export.")
+                await callback.answer()
+                return
+            
+            # Decrypt the S-address secret
+            from services.kms_service import KMSService
+            import json
+            
+            kms_service = KMSService()
+            decrypted_json = kms_service.decrypt_s_address_secret(user_data['encrypted_s_address_secret'])
+            s_address_data = json.loads(decrypted_json)
+            s_address_secret = s_address_data['s_address_secret']
+            
+            # Create export message
+            pioneer_badge = "👑 Pioneer" if user_data['pioneer_status'] else ""
+            
+            export_message = f"""📤 **Your Old Wallet Export**
+
+**Wallet Details:**
+• Public Key: `{user_data['public_key']}`
+• S-Address Secret: `{s_address_secret}`
+• Status: {pioneer_badge}
+
+**⚠️ SECURITY WARNING:**
+• This is your private key - keep it secret!
+• Anyone with this key can access your funds
+• Store it securely offline
+
+**Important Notes:**
+• This is your **old wallet** that will be retired
+• You need to register for a **new Turnkey wallet** to continue using the bot
+• Consider transferring funds to your new Turnkey wallet for continued trading
+
+**How to Use:**
+1. Import this S-address secret into any Stellar wallet (Xbull, Lobstr, etc.)
+2. You'll have full control over your funds
+3. Use these funds to fund your new Turnkey wallet
+
+**Need Help?**
+Contact support if you need assistance with the export."""
+
+            # Mark as notified
+            await conn.execute("""
+                UPDATE users SET migration_notified = TRUE 
+                WHERE telegram_id = $1
+            """, telegram_id)
+            
+            await callback.message.reply(export_message, parse_mode="Markdown")
+            logger.info(f"Successfully exported wallet for user {telegram_id}")
+            
+    except Exception as e:
+        logger.error(f"Error exporting legacy wallet for user {telegram_id}: {e}")
+        await callback.message.reply("❌ Error exporting wallet. Please try again or contact support.")
+    
+    await callback.answer()
+
+async def process_migration_notified_later(callback: types.CallbackQuery, app_context):
+    """Handle 'later' option for migration notification"""
+    telegram_id = callback.from_user.id
+    
+    try:
+        async with app_context.db_pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE users SET migration_notified = TRUE 
+                WHERE telegram_id = $1
+            """, telegram_id)
+        
+        await callback.message.reply(
+            "✅ Got it! You can export your wallet keys anytime from the Wallet Management menu.\n\n"
+            "Use /start to access the main menu."
+        )
+        
+    except Exception as e:
+        logger.error(f"Error marking migration as notified for user {telegram_id}: {e}")
+        await callback.message.reply("❌ Error. Please try again.")
+    
+    await callback.answer()
+
+async def process_register_new_wallet(callback: types.CallbackQuery, app_context):
+    """Handle registration for new Turnkey wallet from legacy users"""
+    telegram_id = callback.from_user.id
+    logger.info(f"Processing new wallet registration for legacy user {telegram_id}")
+    
+    try:
+        # Check if user is a legacy migrated user
+        async with app_context.db_pool.acquire() as conn:
+            user_data = await conn.fetchrow("""
+                SELECT telegram_id, source_old_db, pioneer_status, public_key
+                FROM users WHERE telegram_id = $1 AND source_old_db IS NOT NULL
+            """, telegram_id)
+            
+            if not user_data:
+                await callback.message.reply("❌ You don't appear to be a legacy migrated user.")
+                await callback.answer()
+                return
+            
+            # Mark as notified about migration
+            await conn.execute("""
+                UPDATE users SET migration_notified = TRUE 
+                WHERE telegram_id = $1
+            """, telegram_id)
+        
+        # Generate registration link for new Turnkey wallet
+        mini_app_url = f"https://lumenbro.com/mini-app/index.html?action=register&legacy_user=true&telegram_id={telegram_id}"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📱 Register New Turnkey Wallet", web_app=WebAppInfo(url=mini_app_url))],
+            [InlineKeyboardButton(text="⏰ Later", callback_data="migration_notified_later")]
+        ])
+        
+        pioneer_status = "👑 Pioneer" if user_data['pioneer_status'] else "Regular User"
+        registration_message = f"""📱 **Register Your New Turnkey Wallet**
+
+**Your Legacy Status:**
+• {pioneer_status} (will be preserved)
+• Old Public Key: `{user_data['public_key']}`
+
+**What You're Doing:**
+• Creating a new secure Turnkey wallet
+• This will be your new trading wallet
+• Your old wallet will be retired
+
+**Next Steps:**
+1. Click "Register New Turnkey Wallet" below
+2. Follow the registration process
+3. Your new wallet will be ready for trading
+
+**Note:** Your pioneer status will be preserved in the new system."""
+
+        await callback.message.reply(registration_message, reply_markup=keyboard, parse_mode="Markdown")
+        logger.info(f"Successfully initiated new wallet registration for legacy user {telegram_id}")
+        
+    except Exception as e:
+        logger.error(f"Error processing new wallet registration for user {telegram_id}: {e}")
+        await callback.message.reply("❌ Error processing registration. Please try again or contact support.")
+    
+    await callback.answer()
+
+async def process_migration_help(callback: types.CallbackQuery):
+    """Handle help request for migration"""
+    help_text = """❓ **Migration Help**
+
+**What is this migration?**
+We've upgraded our system to be more secure and user-friendly. Your old wallet data has been safely transferred to the new system.
+
+**What happens to my old wallet?**
+• Your old wallet will be retired and won't work with the new bot
+• You need to register for a new Turnkey wallet to continue trading
+• Your funds are safe and accessible through the exported keys
+
+**What should I do?**
+1. Export your old wallet keys (for fund management)
+2. Register for a new Turnkey wallet to continue trading
+3. Optionally transfer funds from old wallet to new wallet
+
+**What are wallet keys?**
+• Public Key: Your wallet address (safe to share)
+• S-Address Secret: Your private key (keep secret!)
+
+**Why export my keys?**
+• Full control over your funds
+• Access from any Stellar wallet
+• Backup in case of bot issues
+
+**Is this safe?**
+✅ Your funds are secure
+✅ The export is encrypted
+✅ You control your private key
+
+**Need more help?**
+Contact @lumenbrobot support in Telegram."""
+
+    await callback.message.reply(help_text, parse_mode="Markdown")
+    await callback.answer()
 
 async def cancel_command(message: types.Message, state: FSMContext):
     await state.clear()
@@ -241,7 +483,91 @@ async def get_founder_count(db_pool):
     async with db_pool.acquire() as conn:
         return await conn.fetchval("SELECT COUNT(*) FROM founders")
 
+async def check_pioneer_eligibility(telegram_id, db_pool):
+    """Check if user is eligible to become a pioneer"""
+    try:
+        import aiohttp
+        
+        # Call Node.js endpoint to check eligibility
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://lumenbro.com/api/check-pioneer-eligibility?telegramId={telegram_id}"
+            ) as response:
+                if response.status != 200:
+                    # Fallback to local check
+                    return await check_pioneer_eligibility_local(telegram_id, db_pool)
+                
+                eligibility_data = await response.json()
+                return eligibility_data
+                
+    except Exception as e:
+        logger.error(f"Error checking pioneer eligibility: {e}")
+        # Fallback to local check
+        return await check_pioneer_eligibility_local(telegram_id, db_pool)
+
+async def check_pioneer_eligibility_local(telegram_id, db_pool):
+    """Local fallback for checking pioneer eligibility"""
+    async with db_pool.acquire() as conn:
+        # Check if user was referred (referees cannot become pioneers)
+        referral_exists = await conn.fetchval(
+            "SELECT 1 FROM referrals WHERE referee_id = $1", telegram_id
+        )
+        
+        if referral_exists:
+            return { 'eligible': False, 'reason': "Users who were referred cannot become pioneers." }
+
+        # Check current pioneer count
+        founder_count = await conn.fetchval("SELECT COUNT(*) FROM founders")
+        
+        if founder_count >= 25:
+            return { 'eligible': False, 'reason': "Sorry, the pioneer program is full! Only 25 slots are available." }
+
+        return { 'eligible': True, 'currentCount': founder_count }
+
 async def add_founder(telegram_id, db_pool):
+    """Add user as pioneer (founder) using Node.js endpoint for consistency"""
+    try:
+        import aiohttp
+        import json
+        
+        # Call Node.js endpoint to check eligibility and add pioneer
+        async with aiohttp.ClientSession() as session:
+            # First check eligibility
+            async with session.get(
+                f"https://lumenbro.com/api/check-pioneer-eligibility?telegramId={telegram_id}"
+            ) as response:
+                if response.status != 200:
+                    raise ValueError("Error checking pioneer eligibility")
+                
+                eligibility_data = await response.json()
+                
+                if not eligibility_data.get('eligible', False):
+                    raise ValueError(eligibility_data.get('reason', 'Unknown error'))
+            
+            # If eligible, register as pioneer
+            async with session.post(
+                "https://lumenbro.com/api/register-pioneer",
+                json={'telegramId': telegram_id}
+            ) as response:
+                if response.status != 200:
+                    raise ValueError("Error registering as pioneer")
+                
+                result = await response.json()
+                if not result.get('success', False):
+                    raise ValueError(result.get('message', 'Unknown error'))
+        
+        return True
+        
+    except aiohttp.ClientError as e:
+        logger.error(f"Network error calling Node.js endpoint: {e}")
+        # Fallback to local check if Node.js is unavailable
+        return await add_founder_local(telegram_id, db_pool)
+    except Exception as e:
+        logger.error(f"Error in add_founder: {e}")
+        raise ValueError(str(e))
+
+async def add_founder_local(telegram_id, db_pool):
+    """Local fallback for adding founder (original implementation)"""
     async with db_pool.acquire() as conn:
         # Check if the user was referred (is a referee)
         referral_exists = await conn.fetchval(
@@ -297,14 +623,63 @@ async def register_command(message: types.Message, app_context, state: FSMContex
             logger.error(f"Failed to fetch username for {telegram_id}: {str(e)}")
             username = None
 
-    # Check if user exists
+    # Check if user exists and if they are a legacy migrated user
     async with app_context.db_pool.acquire() as conn:
-        exists = await conn.fetchval("SELECT telegram_id FROM users WHERE telegram_id = $1", telegram_id)
-        if exists:
-            await message.reply("You’re already registered!")
-            return
+        user_data = await conn.fetchrow("""
+            SELECT telegram_id, source_old_db, pioneer_status, referral_code, referrer_id
+            FROM users WHERE telegram_id = $1
+        """, telegram_id)
+        
+        if user_data:
+            # Check if this is a legacy migrated user
+            if user_data['source_old_db']:
+                # Legacy user - skip referral code requirement and use existing data
+                logger.info(f"Legacy user {telegram_id} registering for new Turnkey wallet")
+                
+                # Use existing referral data if available
+                referrer_id = user_data['referrer_id']
+                referral_code = user_data['referral_code']
+                
+                # Generate JWT token for legacy user
+                jwt_secret = os.getenv('JWT_SECRET')
+                token = jwt.encode({
+                    'telegram_id': telegram_id,
+                    'referrer_id': referrer_id,
+                    'legacy_user': True,
+                    'pioneer_status': user_data['pioneer_status'],
+                    'exp': time.time() + 600  # 10min expiry
+                }, jwt_secret, algorithm='HS256')
 
-    # Handle referral code
+                # Send link button for legacy user
+                mini_app_url = f"https://lumenbro.com/mini-app/index.html?action=register&legacy_user=true&telegram_id={telegram_id}&referrer_id={referrer_id or ''}"
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📱 Register New Turnkey Wallet", web_app=WebAppInfo(url=mini_app_url))]
+                ])
+                
+                pioneer_status = "👑 Pioneer" if user_data['pioneer_status'] else "Regular User"
+                await message.reply(
+                    f"📱 **Register Your New Turnkey Wallet**\n\n"
+                    f"**Your Legacy Status:** {pioneer_status} (will be preserved)\n\n"
+                    f"**What You're Doing:**\n"
+                    f"• Creating a new secure Turnkey wallet\n"
+                    f"• This will be your new trading wallet\n"
+                    f"• Your old wallet will be retired\n\n"
+                    f"**Next Steps:**\n"
+                    f"1. Click 'Register New Turnkey Wallet' below\n"
+                    f"2. Follow the registration process\n"
+                    f"3. Your new wallet will be ready for trading\n\n"
+                    f"**Note:** Your pioneer status will be preserved in the new system.",
+                    reply_markup=keyboard,
+                    parse_mode="Markdown"
+                )
+                await state.clear()
+                return
+            else:
+                # Regular existing user
+                await message.reply("You're already registered!")
+                return
+
+    # Handle referral code for new users
     referral_code = None
     referrer_id = None
     if state:
@@ -346,7 +721,7 @@ async def register_command(message: types.Message, app_context, state: FSMContex
         await state.clear()
         return
 
-    # Generate JWT token
+    # Generate JWT token for new user
     jwt_secret = os.getenv('JWT_SECRET')  # Set in .env
     token = jwt.encode({
         'telegram_id': telegram_id,
@@ -442,7 +817,7 @@ async def confirm_seed_saved(callback: types.CallbackQuery, app_context, state: 
                 f"Great\\! The Message with your secret seed has been deleted, and your wallet is ready\\.\n\n"
                 f"To complete your registration, please click below to confirm your pioneer status:\n"
                 f"[{escaped_link}]({escaped_link})\n\n"
-                f"Note: Pioneer slots are limited to 25 users\\. If the limit is reached, you’ll be notified after clicking the link\\."
+                f"Note: Pioneer slots are limited to 25 users\\. If the limit is reached, you'll be notified after clicking the link\\."
             )
             try:
                 await callback.message.answer(message_text, parse_mode="MarkdownV2")
@@ -453,7 +828,7 @@ async def confirm_seed_saved(callback: types.CallbackQuery, app_context, state: 
                     f"Great! The Message with your secret seed has been deleted, and your wallet is ready.\n"
                     f"To complete your registration, please click below to confirm your pioneer status:\n"
                     f"{founder_link}\n\n"
- f"Note: Pioneer slots are limited to 25 users. If the limit is reached, you’ll be notified after clicking the link.",
+ f"Note: Pioneer slots are limited to 25 users. If the limit is reached, you'll be notified after clicking the link.",
                     parse_mode=None
                 )
 
@@ -926,7 +1301,7 @@ async def process_balance(message_or_callback: types.Message | types.CallbackQue
             logger.debug("Account not found, sending unfunded message")
             await target.reply(
                 f"Your wallet: `{public_key}`\n"
-                f"Your account isn’t funded yet. To activate it, send XLM to your public key from an exchange or wallet (e.g., Coinbase, Kraken, Lobstr).",
+                f"Your account isn't funded yet. To activate it, send XLM to your public key from an exchange or wallet (e.g., Coinbase, Kraken, Lobstr).",
                 parse_mode="Markdown"
             )
     except Exception as e:
@@ -1055,7 +1430,7 @@ async def help_faq_command(message: types.Message):
         "Your gateway to trading on the Stellar network! Buy, sell, manage assets, follow top traders with copy trading, "
         "and earn rewards by inviting friends.\n\n"
         "*How do I start?*\n"
-        "Use /start to check your wallet or begin registration. You’ll get a dedicated wallet for bot trading.\n\n"
+        "Use /start to check your wallet or begin registration. You'll get a dedicated wallet for bot trading.\n\n"
         "*How much are fees?*\n"
         "1% of all transactions for direct registration 10% discount if referred, wallet ranking report service is free. (dedicated Horizon and RPC servers are being used in both bot and walletrank)\n\n"
         "*What can I do?*\n"
@@ -1067,7 +1442,7 @@ async def help_faq_command(message: types.Message):
         "- *Trustlines*: Add (/addtrust) or remove (/removetrust) assets to trade.\n"
         "- *Help*: Use /help for this guide.\n\n"
         "*How do I fund my wallet?*\n"
-        "Send XLM to your wallet’s public key from an exchange (e.g., Coinbase, Kraken, Lobstr). "
+        "Send XLM to your wallet's public key from an exchange (e.g., Coinbase, Kraken, Lobstr). "
         "Fund only what you plan to trade to keep your main wallets safe.\n\n"
         "*Do i manually have to add trustlines for copy-trading or buy/sell?*\n"
         "No, the bot will automatically add trustlines for you when you perform a buy/sell or copy-trade.\n\n"
@@ -1097,7 +1472,7 @@ async def help_faq_callback(callback: types.CallbackQuery):
         "Your gateway to trading on the Stellar network! Buy, sell, manage assets, follow top traders with copy trading, "
         "and earn rewards by inviting friends.\n\n"
         "*How do I start?*\n"
-        "Use /start to check your wallet or begin registration. You’ll get a dedicated wallet for bot trading.\n\n"
+        "Use /start to check your wallet or begin registration. You'll get a dedicated wallet for bot trading.\n\n"
         "*How much are fees?*\n"
         "1% of all transactions for direct registration 10% discount if referred, wallet ranking report service is free. (dedicated Horizon and RPC servers are being used for both bot and walletrank)\n\n"
         "*What can I do?*\n"
@@ -1109,7 +1484,7 @@ async def help_faq_callback(callback: types.CallbackQuery):
         "- *Trustlines*: Add (/addtrust) or remove (/removetrust) assets to trade.\n"
         "- *Help*: Use /help for/living this guide.\n\n"
         "*How do I fund my wallet?*\n"
-        "Send XLM to your wallet’s public key from an exchange (e.g., Coinbase, Kraken, Lobstr). "
+        "Send XLM to your wallet's public key from an exchange (e.g., Coinbase, Kraken, Lobstr). "
         "Fund only what you plan to trade to keep your main wallets safe.\n\n"
         "*Do i manually have to add trustlines for copy-trading or buy/sell?*\n"
         "No, the bot will automatically add trustlines for you when you perform a buy/sell or copy-trade.\n\n"
@@ -1288,6 +1663,23 @@ def register_main_handlers(dp, app_context, streaming_service):
 
     dp.callback_query.register(partial(process_wallet_management, app_context), lambda c: c.data == "wallet_management")
     dp.callback_query.register(process_main_menu_callback, lambda c: c.data == "main_menu")  # No partial needed if no extra args
+
+    # Migration callback handlers
+    async def migration_export_handler(callback: types.CallbackQuery):
+        await process_migration_export(callback, app_context)
+    dp.callback_query.register(migration_export_handler, lambda c: c.data == "export_legacy_wallet")
+
+    async def migration_notified_later_handler(callback: types.CallbackQuery):
+        await process_migration_notified_later(callback, app_context)
+    dp.callback_query.register(migration_notified_later_handler, lambda c: c.data == "migration_notified_later")
+
+    async def migration_help_handler(callback: types.CallbackQuery):
+        await process_migration_help(callback)
+    dp.callback_query.register(migration_help_handler, lambda c: c.data == "migration_help")
+
+    async def register_new_wallet_handler(callback: types.CallbackQuery):
+        await process_register_new_wallet(callback, app_context)
+    dp.callback_query.register(register_new_wallet_handler, lambda c: c.data == "register_new_wallet")
 
     async def login_handler(message: types.Message):
         await login_command(message, app_context)

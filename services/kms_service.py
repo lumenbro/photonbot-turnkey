@@ -48,6 +48,39 @@ class KMSService:
             logger.error(f"Exception type: {type(e).__name__}")
             raise ValueError(f"KMS decryption failed: {str(e)}")
 
+    def decrypt_s_address_secret(self, encrypted_data):
+        """Decrypt S-address secret using AWS KMS"""
+        try:
+            logger.info(f"Attempting to decrypt S-address secret with key_id: {self.key_id}")
+            logger.debug(f"Encrypted data length: {len(encrypted_data)}")
+            
+            # Decode base64
+            ciphertext_blob = base64.b64decode(encrypted_data)
+            logger.debug(f"Ciphertext blob length: {len(ciphertext_blob)}")
+            
+            # Use the same encryption context as the migration
+            response = self.kms_client.decrypt(
+                CiphertextBlob=ciphertext_blob,
+                KeyId=self.key_id,
+                EncryptionContext={
+                    'Service': 'lumenbro-migration',
+                    'Environment': 'production',
+                    'DataType': 's_address'
+                }
+            )
+            
+            logger.debug(f"KMS response received, plaintext length: {len(response['Plaintext'])}")
+            
+            # Decode the plaintext
+            s_address_secret = response["Plaintext"].decode("utf-8")
+            logger.info(f"Successfully decrypted S-address secret: {s_address_secret[:20]}...")
+            
+            return s_address_secret
+        except Exception as e:
+            logger.error(f"KMS decryption failed: {str(e)}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            raise ValueError(f"KMS decryption failed: {str(e)}")
+
     def test_connection(self):
         """Test KMS connection and key access"""
         try:

@@ -31,16 +31,21 @@ main_menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
 
 async def get_wallet_management_menu(telegram_id, app_context):
     async with app_context.db_pool.acquire() as conn:
-        row = await conn.fetchrow(
+        # Check if user has a Turnkey wallet
+        turnkey_row = await conn.fetchrow(
             "SELECT turnkey_sub_org_id FROM turnkey_wallets WHERE telegram_id = $1 AND is_active = TRUE", 
             telegram_id
         )
-        if not row:
+        
+        # Check if user is a legacy migrated user
+        legacy_user = await conn.fetchrow("""
+            SELECT encrypted_s_address_secret, public_key, pioneer_status, source_old_db
+            FROM users WHERE telegram_id = $1 AND source_old_db IS NOT NULL
+        """, telegram_id)
+        
+        if not turnkey_row and not legacy_user:
             return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="No Wallet - Register First", callback_data="ignore")]]), "No Wallet - Register First"
-        sub_org_id = row['turnkey_sub_org_id']
-        # Assuming email is fetched from users table if added; fallback for now
-        email = (await conn.fetchval("SELECT user_email FROM users WHERE telegram_id = $1", telegram_id)) or "unknown@lumenbro.com"
-
+        
         # Check session status
         session_active = await conn.fetchval(
             "SELECT session_expiry > NOW() FROM users WHERE telegram_id = $1", telegram_id
@@ -48,18 +53,35 @@ async def get_wallet_management_menu(telegram_id, app_context):
         status_icon = "🟢 Active" if session_active else "🔴 Expired (Login Needed)"
         menu_text = f"Wallet Management ({status_icon}):"
 
-    mini_app_base = "https://lumenbro.com/mini-app/index.html"
-    login_url = f"{mini_app_base}?action=login&orgId={sub_org_id}&email={email}"
-    recovery_url = f"{mini_app_base}?action=recover&orgId={sub_org_id}&email={email}"
-    check_keys_url = mini_app_base  # Plain URL to load Mini App UI without auto-action
-
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Login (Establish Session)", web_app=WebAppInfo(url=login_url))],
-        [InlineKeyboardButton(text="Recovery (Lost Device/Passkey)", web_app=WebAppInfo(url=recovery_url))],
-        [InlineKeyboardButton(text="Check API Keys (Debug)", web_app=WebAppInfo(url=check_keys_url))],  # New button
-        [InlineKeyboardButton(text="Logout (Clear Session)", callback_data="logout")],  # New logout button
-        [InlineKeyboardButton(text="Back to Main Menu", callback_data="main_menu")]
-    ]), menu_text
+        # Build menu based on user type
+        menu_buttons = []
+        
+        if turnkey_row:
+            # Turnkey user - show Turnkey options
+            sub_org_id = turnkey_row['turnkey_sub_org_id']
+            email = (await conn.fetchval("SELECT user_email FROM users WHERE telegram_id = $1", telegram_id)) or "unknown@lumenbro.com"
+            
+            mini_app_base = "https://lumenbro.com/mini-app/index.html"
+            login_url = f"{mini_app_base}?action=login&orgId={sub_org_id}&email={email}"
+            recovery_url = f"{mini_app_base}?action=recover&orgId={sub_org_id}&email={email}"
+            check_keys_url = mini_app_base
+            
+            menu_buttons.extend([
+                [InlineKeyboardButton(text="Login (Establish Session)", web_app=WebAppInfo(url=login_url))],
+                [InlineKeyboardButton(text="Recovery (Lost Device/Passkey)", web_app=WebAppInfo(url=recovery_url))],
+                [InlineKeyboardButton(text="Check API Keys (Debug)", web_app=WebAppInfo(url=check_keys_url))],
+                [InlineKeyboardButton(text="Logout (Clear Session)", callback_data="logout")]
+            ])
+        
+        if legacy_user:
+            # Legacy migrated user - show export option
+            pioneer_badge = "👑 Pioneer" if legacy_user['pioneer_status'] else ""
+            menu_buttons.append([InlineKeyboardButton(text=f"📤 Export Legacy Wallet ({pioneer_badge})", callback_data="export_legacy_wallet")])
+        
+        # Add back button
+        menu_buttons.append([InlineKeyboardButton(text="Back to Main Menu", callback_data="main_menu")])
+        
+        return InlineKeyboardMarkup(inline_keyboard=menu_buttons), menu_text
 
 async def wallet_management_menu_command(message: types.Message, app_context):
     telegram_id = message.from_user.id
@@ -125,6 +147,71 @@ async def process_logout_callback(callback: types.CallbackQuery, app_context):
     
     await callback.answer()
 
+async def process_legacy_wallet_export(callback: types.CallbackQuery, app_context):
+    """Handle legacy wallet export from wallet management menu"""
+    telegram_id = callback.from_user.id
+    logger.info(f"Processing legacy wallet export from menu for user {telegram_id}")
+    
+    try:
+        # Get user's encrypted S-address secret
+        async with app_context.db_pool.acquire() as conn:
+            user_data = await conn.fetchrow("""
+                SELECT encrypted_s_address_secret, public_key, pioneer_status, source_old_db
+                FROM users WHERE telegram_id = $1 AND source_old_db IS NOT NULL
+            """, telegram_id)
+            
+            if not user_data or not user_data['encrypted_s_address_secret']:
+                await callback.message.reply("❌ No legacy wallet data found for export.")
+                await callback.answer()
+                return
+            
+            # Decrypt the S-address secret
+            from services.kms_service import KMSService
+            import json
+            
+            kms_service = KMSService()
+            decrypted_json = kms_service.decrypt_s_address_secret(user_data['encrypted_s_address_secret'])
+            s_address_data = json.loads(decrypted_json)
+            s_address_secret = s_address_data['s_address_secret']
+            
+            # Create export message
+            pioneer_badge = "👑 Pioneer" if user_data['pioneer_status'] else ""
+            
+            export_message = f"""📤 **Your Old Wallet Export**
+
+**Wallet Details:**
+• Public Key: `{user_data['public_key']}`
+• S-Address Secret: `{s_address_secret}`
+• Status: {pioneer_badge}
+• Source: {user_data['source_old_db']}
+
+**⚠️ SECURITY WARNING:**
+• This is your private key - keep it secret!
+• Anyone with this key can access your funds
+• Store it securely offline
+
+**Important Notes:**
+• This is your **old wallet** that will be retired
+• You need to register for a **new Turnkey wallet** to continue using the bot
+• Consider transferring funds to your new Turnkey wallet for continued trading
+
+**How to Use:**
+1. Import this S-address secret into any Stellar wallet (Xbull, Lobstr, etc.)
+2. You'll have full control over your funds
+3. Use these funds to fund your new Turnkey wallet
+
+**Need Help?**
+Contact support if you need assistance with the export."""
+
+            await callback.message.reply(export_message, parse_mode="Markdown")
+            logger.info(f"Successfully exported legacy wallet for user {telegram_id}")
+            
+    except Exception as e:
+        logger.error(f"Error exporting legacy wallet for user {telegram_id}: {e}")
+        await callback.message.reply("❌ Error exporting wallet. Please try again or contact support.")
+    
+    await callback.answer()
+
 # Placeholder for future features like import/export wallets
 async def import_wallet(message: types.Message, app_context):
     await message.reply("Import Wallet feature coming soon (requires Turnkey $99/month plan).")
@@ -148,6 +235,7 @@ def register_wallet_management_handlers(dp, app_context):
     dp.callback_query.register(lambda c: process_wallet_management_callback(c, app_context), lambda c: c.data == "wallet_management")
     dp.callback_query.register(lambda c: process_main_menu_callback(c), lambda c: c.data == "main_menu")
     dp.callback_query.register(lambda c: process_logout_callback(c, app_context), lambda c: c.data == "logout")
+    dp.callback_query.register(lambda c: process_legacy_wallet_export(c, app_context), lambda c: c.data == "export_legacy_wallet")
     
     # Placeholder registrations for future features
     dp.message.register(lambda m: import_wallet(m, app_context), Command("import_wallet"))
