@@ -78,9 +78,14 @@ async def get_wallet_management_menu(telegram_id, app_context):
             # Legacy migrated user - show export option and debug tools
             pioneer_badge = "👑 Pioneer" if legacy_user['pioneer_status'] else ""
             menu_buttons.extend([
-                [InlineKeyboardButton(text=f"📤 Export Legacy Wallet ({pioneer_badge})", callback_data="export_legacy_wallet")],
-                [InlineKeyboardButton(text="🔧 Clear Cloud Storage (Debug)", callback_data="clear_cloud_storage")]
+                [InlineKeyboardButton(text=f"📤 Export Legacy Wallet ({pioneer_badge})", callback_data="export_legacy_wallet")]
             ])
+            
+            # Debug buttons only for specific test user (your Telegram ID)
+            if telegram_id == 5014800072:  # Your test user ID
+                menu_buttons.extend([
+                    [InlineKeyboardButton(text="🔧 Clear Cloud Storage (Debug)", callback_data="clear_cloud_storage")]
+                ])
         
         # Add back button
         menu_buttons.append([InlineKeyboardButton(text="Back to Main Menu", callback_data="main_menu")])
