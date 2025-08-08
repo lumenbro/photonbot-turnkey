@@ -960,12 +960,30 @@ async def confirm_unregister(callback: types.CallbackQuery, app_context, streami
         if f"confirm_unregister_{telegram_id}" in callback.data:
             logger.info(f"Proceeding with unregister for user {telegram_id}")
             async with app_context.db_pool.acquire() as conn:
-                # Clear session fields from users
-                await conn.execute(
-                    "UPDATE users SET turnkey_session_id = NULL, temp_api_public_key = NULL, temp_api_private_key = NULL, session_expiry = NULL WHERE telegram_id = $1",
-                    telegram_id
-                )
-                await conn.execute("DELETE FROM users WHERE telegram_id = $1", telegram_id)
+                # Clear session fields from users (but preserve migration data)
+                await conn.execute("""
+                    UPDATE users SET 
+                        turnkey_session_id = NULL, 
+                        temp_api_public_key = NULL, 
+                        temp_api_private_key = NULL, 
+                        kms_encrypted_session_key = NULL,
+                        kms_key_id = NULL,
+                        session_expiry = NULL,
+                        session_created_at = NULL,
+                        turnkey_user_id = NULL,
+                        user_email = NULL
+                    WHERE telegram_id = $1
+                """, telegram_id)
+                
+                # Note: We don't delete from users table to preserve migration data
+                # Only delete if user is not a migrated user
+                user_check = await conn.fetchrow("""
+                    SELECT source_old_db FROM users WHERE telegram_id = $1
+                """, telegram_id)
+                
+                if not user_check or not user_check['source_old_db']:
+                    # Only delete if not a migrated user
+                    await conn.execute("DELETE FROM users WHERE telegram_id = $1", telegram_id)
                 result = await conn.fetchval("SELECT telegram_id FROM users WHERE telegram_id = $1", telegram_id)
                 if result:
                     logger.error(f"Deletion failed: User {telegram_id} still exists in database")

@@ -74,9 +74,12 @@ async def get_wallet_management_menu(telegram_id, app_context):
             ])
         
         if legacy_user:
-            # Legacy migrated user - show export option
+            # Legacy migrated user - show export option and debug tools
             pioneer_badge = "👑 Pioneer" if legacy_user['pioneer_status'] else ""
-            menu_buttons.append([InlineKeyboardButton(text=f"📤 Export Legacy Wallet ({pioneer_badge})", callback_data="export_legacy_wallet")])
+            menu_buttons.extend([
+                [InlineKeyboardButton(text=f"📤 Export Legacy Wallet ({pioneer_badge})", callback_data="export_legacy_wallet")],
+                [InlineKeyboardButton(text="🔧 Clear Cloud Storage (Debug)", callback_data="clear_cloud_storage")]
+            ])
         
         # Add back button
         menu_buttons.append([InlineKeyboardButton(text="Back to Main Menu", callback_data="main_menu")])
@@ -212,6 +215,37 @@ Contact support if you need assistance with the export."""
     
     await callback.answer()
 
+async def process_clear_cloud_storage(callback: types.CallbackQuery, app_context):
+    """Handle clearing cloud storage for legacy users (debug function)"""
+    telegram_id = callback.from_user.id
+    logger.info(f"Processing clear cloud storage for user {telegram_id}")
+    
+    try:
+        # Create mini-app URL that will show the clear storage button
+        mini_app_base = "https://lumenbro.com/mini-app/index.html"
+        clear_storage_url = f"{mini_app_base}?action=clear&telegram_id={telegram_id}"
+        
+        # Create inline keyboard with the clear storage link
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔧 Clear Cloud Storage", web_app=WebAppInfo(url=clear_storage_url))],
+            [InlineKeyboardButton(text="Back to Wallet Management", callback_data="wallet_management")]
+        ])
+        
+        await callback.message.reply(
+            "🔧 **Clear Cloud Storage (Debug)**\n\n"
+            "This will clear any existing API keys from Telegram Cloud Storage.\n"
+            "Use this if you're having registration issues.\n\n"
+            "Click the button below to open the mini-app and clear storage:",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error creating clear storage link for user {telegram_id}: {e}")
+        await callback.message.reply("❌ Error creating clear storage link. Please try again.")
+    
+    await callback.answer()
+
 # Placeholder for future features like import/export wallets
 async def import_wallet(message: types.Message, app_context):
     await message.reply("Import Wallet feature coming soon (requires Turnkey $99/month plan).")
@@ -236,6 +270,7 @@ def register_wallet_management_handlers(dp, app_context):
     dp.callback_query.register(lambda c: process_main_menu_callback(c), lambda c: c.data == "main_menu")
     dp.callback_query.register(lambda c: process_logout_callback(c, app_context), lambda c: c.data == "logout")
     dp.callback_query.register(lambda c: process_legacy_wallet_export(c, app_context), lambda c: c.data == "export_legacy_wallet")
+    dp.callback_query.register(lambda c: process_clear_cloud_storage(c, app_context), lambda c: c.data == "clear_cloud_storage")
     
     # Placeholder registrations for future features
     dp.message.register(lambda m: import_wallet(m, app_context), Command("import_wallet"))
