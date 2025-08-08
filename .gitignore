@@ -170,3 +170,4 @@ simple_analyze_format.py
 decrypt_old_format.py
 test_current_data_format.py
 scp_sensitive_data.py
+services/price_cache.json
