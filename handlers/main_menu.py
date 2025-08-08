@@ -311,12 +311,9 @@ async def process_migration_export(callback: types.CallbackQuery, app_context):
             
             # Decrypt the S-address secret
             from services.kms_service import KMSService
-            import json
             
             kms_service = KMSService()
-            decrypted_json = kms_service.decrypt_s_address_secret(user_data['encrypted_s_address_secret'])
-            s_address_data = json.loads(decrypted_json)
-            s_address_secret = s_address_data['s_address_secret']
+            s_address_secret = kms_service.decrypt_s_address_secret(user_data['encrypted_s_address_secret'])
             
             # Create export message
             pioneer_badge = "👑 Pioneer" if user_data['pioneer_status'] else ""
