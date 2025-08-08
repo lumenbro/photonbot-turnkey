@@ -267,11 +267,23 @@ def register_wallet_management_handlers(dp, app_context):
         await wallet_management_menu_command(message, app_context)
     dp.message.register(menu_handler, Command("wallet_management_menu"))
     
-    dp.callback_query.register(partial(process_wallet_management_callback, app_context), lambda c: c.data == "wallet_management")
+    async def wallet_management_handler(callback: types.CallbackQuery):
+        await process_wallet_management_callback(callback, app_context)
+    dp.callback_query.register(wallet_management_handler, lambda c: c.data == "wallet_management")
+    
     dp.callback_query.register(process_main_menu_callback, lambda c: c.data == "main_menu")
-    dp.callback_query.register(partial(process_logout_callback, app_context), lambda c: c.data == "logout")
-    dp.callback_query.register(partial(process_legacy_wallet_export, app_context), lambda c: c.data == "export_legacy_wallet")
-    dp.callback_query.register(partial(process_clear_cloud_storage, app_context), lambda c: c.data == "clear_cloud_storage")
+    
+    async def logout_handler(callback: types.CallbackQuery):
+        await process_logout_callback(callback, app_context)
+    dp.callback_query.register(logout_handler, lambda c: c.data == "logout")
+    
+    async def legacy_export_handler(callback: types.CallbackQuery):
+        await process_legacy_wallet_export(callback, app_context)
+    dp.callback_query.register(legacy_export_handler, lambda c: c.data == "export_legacy_wallet")
+    
+    async def clear_storage_handler(callback: types.CallbackQuery):
+        await process_clear_cloud_storage(callback, app_context)
+    dp.callback_query.register(clear_storage_handler, lambda c: c.data == "clear_cloud_storage")
     
     # Placeholder registrations for future features
     dp.message.register(lambda m: import_wallet(m, app_context), Command("import_wallet"))
