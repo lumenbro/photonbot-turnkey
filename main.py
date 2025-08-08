@@ -12,6 +12,7 @@ from core.stellar import load_public_key
 from handlers.main_menu import register_main_handlers
 from handlers.copy_trading import register_copy_handlers
 from handlers.walletmanagement import register_wallet_management_handlers
+from handlers.wallet_commands import register_wallet_commands
 from api import start_server
 import logging
 from datetime import datetime, timedelta, timezone
@@ -91,16 +92,41 @@ class TurnkeySigner:
             temp_public = self.root_api_public_key
             temp_private = self.root_api_private_key
         else:
+            # Use WalletManager to get active wallet
+            from services.wallet_manager import WalletManager
+            wallet_manager = WalletManager(self.app_context.db_pool)
+            active_wallet = await wallet_manager.get_active_wallet(telegram_id)
+            
+            if not active_wallet:
+                raise ValueError(f"No active wallet found for telegram_id {telegram_id}. Create one via Node.js backend.")
+            
+            # For legacy users, get session data from users table
+            # For new users, get wallet data from turnkey_wallets table
             async with self.app_context.db_pool.acquire() as conn:
-                wallet_data = await conn.fetchrow(
-                    "SELECT turnkey_sub_org_id, turnkey_key_id, public_key FROM turnkey_wallets WHERE telegram_id = $1 AND is_active = TRUE",
-                    int(telegram_id)
-                )
-                if not wallet_data:
-                    raise ValueError(f"No active Turnkey wallet found for telegram_id {telegram_id}. Create one via Node.js backend.")
-                sub_org_id = wallet_data["turnkey_sub_org_id"]
-                sign_with = wallet_data["public_key"]  # Use address for signWith
-                public_key = wallet_data["public_key"]
+                # Check if legacy user
+                is_legacy = await wallet_manager.is_legacy_user(telegram_id)
+                
+                if is_legacy:
+                    # Legacy user - use users table for session data
+                    public_key = active_wallet
+                    sign_with = active_wallet
+                    # Get sub_org_id from users table or use default
+                    user_data = await conn.fetchrow(
+                        "SELECT turnkey_session_id FROM users WHERE telegram_id = $1",
+                        telegram_id
+                    )
+                    sub_org_id = user_data["turnkey_session_id"] if user_data and user_data["turnkey_session_id"] else self.turnkey_org_id
+                else:
+                    # New user - use turnkey_wallets table
+                    wallet_data = await conn.fetchrow(
+                        "SELECT turnkey_sub_org_id, turnkey_key_id, public_key FROM turnkey_wallets WHERE telegram_id = $1 AND is_active = TRUE",
+                        int(telegram_id)
+                    )
+                    if not wallet_data:
+                        raise ValueError(f"No active Turnkey wallet found for telegram_id {telegram_id}. Create one via Node.js backend.")
+                    sub_org_id = wallet_data["turnkey_sub_org_id"]
+                    sign_with = wallet_data["public_key"]
+                    public_key = wallet_data["public_key"]
 
                 # Try KMS format first, fall back to legacy format
                 session_data = await conn.fetchrow(
@@ -479,6 +505,7 @@ async def run_master():
     register_copy_handlers(dp=app_context.dp, streaming_service=streaming_service, app_context=app_context)
     register_referral_handlers(app_context.dp, app_context)
     register_wallet_management_handlers(app_context.dp, app_context)
+    register_wallet_commands(app_context.dp, app_context)
 
     await app_context.bot.delete_webhook(drop_pending_updates=True)
     logger.info("Dropped pending updates to prevent stale command processing")

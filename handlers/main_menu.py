@@ -445,6 +445,41 @@ async def process_register_new_wallet(callback: types.CallbackQuery, app_context
                 await callback.answer()
                 return
             
+            # SAFETY CHECK: Check if user already has a Turnkey wallet
+            existing_wallet = await conn.fetchrow("""
+                SELECT public_key, is_active FROM turnkey_wallets 
+                WHERE telegram_id = $1 AND is_active = TRUE
+            """, telegram_id)
+            
+            if existing_wallet:
+                # User already has an active Turnkey wallet - prevent overwriting
+                warning_message = f"""⚠️ **You Already Have a Turnkey Wallet**
+
+**Current Active Wallet:**
+• Public Key: `{existing_wallet['public_key']}`
+• Status: Active
+
+**Why You're Seeing This:**
+You've already completed the migration and have a working Turnkey wallet. The migration button is for users who haven't registered yet.
+
+**What You Can Do:**
+• Use your existing wallet for trading
+• Export your old wallet keys if needed (from Wallet Management)
+• Contact support if you need to reset your wallet
+
+**Need Help?**
+Contact @lumenbrobot support if you need assistance."""
+
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Back to Main Menu", callback_data="main_menu")],
+                    [InlineKeyboardButton(text="📤 Export Old Wallet", callback_data="export_legacy_wallet")]
+                ])
+                
+                await callback.message.reply(warning_message, reply_markup=keyboard, parse_mode="Markdown")
+                logger.info(f"Prevented legacy user {telegram_id} from overwriting existing Turnkey wallet")
+                await callback.answer()
+                return
+            
             # Mark as notified about migration
             await conn.execute("""
                 UPDATE users SET migration_notified = TRUE 
@@ -549,6 +584,41 @@ async def continue_turnkey_registration(callback: types.CallbackQuery, app_conte
             
             if not user_data:
                 await callback.message.reply("❌ You don't appear to be a legacy migrated user.")
+                await callback.answer()
+                return
+            
+            # SAFETY CHECK: Check if user already has a Turnkey wallet
+            existing_wallet = await conn.fetchrow("""
+                SELECT public_key, is_active FROM turnkey_wallets 
+                WHERE telegram_id = $1 AND is_active = TRUE
+            """, telegram_id)
+            
+            if existing_wallet:
+                # User already has an active Turnkey wallet - prevent overwriting
+                warning_message = f"""⚠️ **You Already Have a Turnkey Wallet**
+
+**Current Active Wallet:**
+• Public Key: `{existing_wallet['public_key']}`
+• Status: Active
+
+**Why You're Seeing This:**
+You've already completed the migration and have a working Turnkey wallet. The migration button is for users who haven't registered yet.
+
+**What You Can Do:**
+• Use your existing wallet for trading
+• Export your old wallet keys if needed (from Wallet Management)
+• Contact support if you need to reset your wallet
+
+**Need Help?**
+Contact @lumenbrobot support if you need assistance."""
+
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Back to Main Menu", callback_data="main_menu")],
+                    [InlineKeyboardButton(text="📤 Export Old Wallet", callback_data="export_legacy_wallet")]
+                ])
+                
+                await callback.message.reply(warning_message, reply_markup=keyboard, parse_mode="Markdown")
+                logger.info(f"Prevented legacy user {telegram_id} from overwriting existing Turnkey wallet")
                 await callback.answer()
                 return
         
