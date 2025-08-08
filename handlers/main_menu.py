@@ -349,7 +349,13 @@ Contact support if you need assistance with the export."""
                 WHERE telegram_id = $1
             """, telegram_id)
             
-            await callback.message.reply(export_message, parse_mode="Markdown")
+            # Create keyboard with delete and continue options
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🗑️ Delete Message", callback_data="delete_export_message")],
+                [InlineKeyboardButton(text="🔄 Continue to Turnkey Registration", callback_data="continue_turnkey_registration")]
+            ])
+            
+            await callback.message.reply(export_message, parse_mode="Markdown", reply_markup=keyboard)
             logger.info(f"Successfully exported wallet for user {telegram_id}")
             
     except Exception as e:
@@ -510,6 +516,70 @@ We've upgraded our system to be more secure and user-friendly. Your old wallet d
 ✅ Your funds are secure
 ✅ The export is encrypted
 ✅ You control your private key
+
+async def delete_export_message(callback: types.CallbackQuery):
+    """Delete the message containing sensitive S-address secrets"""
+    try:
+        # Delete the message that contains the sensitive data
+        await callback.message.delete()
+        await callback.answer("✅ Message deleted for security")
+        logger.info(f"User {callback.from_user.id} deleted export message")
+    except Exception as e:
+        logger.error(f"Error deleting export message for user {callback.from_user.id}: {e}")
+        await callback.answer("❌ Could not delete message")
+
+async def continue_turnkey_registration(callback: types.CallbackQuery, app_context):
+    """Continue to Turnkey wallet registration after export"""
+    telegram_id = callback.from_user.id
+    logger.info(f"Continuing to Turnkey registration for user {telegram_id}")
+    
+    try:
+        # Check if user is a legacy migrated user
+        async with app_context.db_pool.acquire() as conn:
+            user_data = await conn.fetchrow("""
+                SELECT telegram_id, source_old_db, pioneer_status, public_key
+                FROM users WHERE telegram_id = $1 AND source_old_db IS NOT NULL
+            """, telegram_id)
+            
+            if not user_data:
+                await callback.message.reply("❌ You don't appear to be a legacy migrated user.")
+                await callback.answer()
+                return
+        
+        # Generate registration link for new Turnkey wallet
+        mini_app_url = f"https://lumenbro.com/mini-app/index.html?action=register&legacy_user=true&telegram_id={telegram_id}"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📱 Register New Turnkey Wallet", web_app=WebAppInfo(url=mini_app_url))],
+            [InlineKeyboardButton(text="⏰ Later", callback_data="migration_notified_later")]
+        ])
+        
+        pioneer_status = "👑 Pioneer" if user_data['pioneer_status'] else "Regular User"
+        registration_message = f"""📱 **Register Your New Turnkey Wallet**
+
+**Your Legacy Status:**
+• {pioneer_status} (will be preserved)
+• Old Public Key: `{user_data['public_key']}`
+
+**What You're Doing:**
+• Creating a new secure Turnkey wallet
+• This will be your new trading wallet
+• Your old wallet will be retired
+
+**Next Steps:**
+1. Click "Register New Turnkey Wallet" below
+2. Follow the registration process
+3. Your new wallet will be ready for trading
+
+**Note:** Your pioneer status will be preserved in the new system."""
+
+        await callback.message.reply(registration_message, reply_markup=keyboard, parse_mode="Markdown")
+        logger.info(f"Successfully continued to Turnkey registration for user {telegram_id}")
+        
+    except Exception as e:
+        logger.error(f"Error continuing to Turnkey registration for user {telegram_id}: {e}")
+        await callback.message.reply("❌ Error processing registration. Please try again or contact support.")
+    
+    await callback.answer()
 
 **Need more help?**
 Contact @lumenbrobot support in Telegram."""
@@ -1740,6 +1810,15 @@ def register_main_handlers(dp, app_context, streaming_service):
     async def register_new_wallet_handler(callback: types.CallbackQuery):
         await process_register_new_wallet(callback, app_context)
     dp.callback_query.register(register_new_wallet_handler, lambda c: c.data == "register_new_wallet")
+
+    # New handlers for export message actions
+    async def delete_export_message_handler(callback: types.CallbackQuery):
+        await delete_export_message(callback)
+    dp.callback_query.register(delete_export_message_handler, lambda c: c.data == "delete_export_message")
+
+    async def continue_turnkey_registration_handler(callback: types.CallbackQuery):
+        await continue_turnkey_registration(callback, app_context)
+    dp.callback_query.register(continue_turnkey_registration_handler, lambda c: c.data == "continue_turnkey_registration")
 
     async def login_handler(message: types.Message):
         await login_command(message, app_context)
