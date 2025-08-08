@@ -60,7 +60,9 @@ class KMSService:
                         'DataType': 's_address'
                     }
                 )
-                decrypted_json = response['Plaintext'].decode('utf-8')
+                # The decrypted data is base64-encoded JSON
+                decrypted_base64 = response['Plaintext'].decode('utf-8')
+                decrypted_json = base64.b64decode(decrypted_base64).decode('utf-8')
                 payload = json.loads(decrypted_json)
                 s_address_secret = payload['s_address_secret']
                 logger.info(f"✅ Successfully decrypted new KMS format")
