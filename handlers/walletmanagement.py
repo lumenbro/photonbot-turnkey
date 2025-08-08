@@ -3,6 +3,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.filters import Command
+from functools import partial
 import asyncio
 import logging
 
@@ -266,11 +267,11 @@ def register_wallet_management_handlers(dp, app_context):
         await wallet_management_menu_command(message, app_context)
     dp.message.register(menu_handler, Command("wallet_management_menu"))
     
-    dp.callback_query.register(lambda c: process_wallet_management_callback(c, app_context), lambda c: c.data == "wallet_management")
-    dp.callback_query.register(lambda c: process_main_menu_callback(c), lambda c: c.data == "main_menu")
-    dp.callback_query.register(lambda c: process_logout_callback(c, app_context), lambda c: c.data == "logout")
-    dp.callback_query.register(lambda c: process_legacy_wallet_export(c, app_context), lambda c: c.data == "export_legacy_wallet")
-    dp.callback_query.register(lambda c: process_clear_cloud_storage(c, app_context), lambda c: c.data == "clear_cloud_storage")
+    dp.callback_query.register(partial(process_wallet_management_callback, app_context), lambda c: c.data == "wallet_management")
+    dp.callback_query.register(process_main_menu_callback, lambda c: c.data == "main_menu")
+    dp.callback_query.register(partial(process_logout_callback, app_context), lambda c: c.data == "logout")
+    dp.callback_query.register(partial(process_legacy_wallet_export, app_context), lambda c: c.data == "export_legacy_wallet")
+    dp.callback_query.register(partial(process_clear_cloud_storage, app_context), lambda c: c.data == "clear_cloud_storage")
     
     # Placeholder registrations for future features
     dp.message.register(lambda m: import_wallet(m, app_context), Command("import_wallet"))
