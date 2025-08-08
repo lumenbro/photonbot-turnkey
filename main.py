@@ -228,7 +228,13 @@ async def init_db_pool():
                 kms_encrypted_session_key TEXT,
                 kms_key_id TEXT,
                 user_email TEXT,
-                session_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                session_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_old_db TEXT,
+                encrypted_s_address_secret TEXT,
+                migration_date TIMESTAMP,
+                pioneer_status BOOLEAN DEFAULT FALSE,
+                migration_notified BOOLEAN DEFAULT FALSE,
+                migration_notified_at TIMESTAMP
             );
             
             -- Add session_created_at column if it doesn't exist (for existing tables)
@@ -239,6 +245,52 @@ async def init_db_pool():
                     WHERE table_name = 'users' AND column_name = 'session_created_at'
                 ) THEN
                     ALTER TABLE users ADD COLUMN session_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+                END IF;
+            END $$;
+            
+            -- Add migration-related columns if they don't exist (for existing tables)
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'source_old_db'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN source_old_db TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'encrypted_s_address_secret'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN encrypted_s_address_secret TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'migration_date'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN migration_date TIMESTAMP;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'pioneer_status'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN pioneer_status BOOLEAN DEFAULT FALSE;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'migration_notified'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN migration_notified BOOLEAN DEFAULT FALSE;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'migration_notified_at'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN migration_notified_at TIMESTAMP;
                 END IF;
             END $$;
             CREATE TABLE IF NOT EXISTS turnkey_wallets (
