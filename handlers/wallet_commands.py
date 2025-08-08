@@ -177,7 +177,10 @@ async def wallet_info_command(message: types.Message, app_context):
 
 def register_wallet_commands(dp, app_context):
     """Register wallet management commands"""
-    dp.message.register(list_wallets_command, commands=["wallets"])
-    dp.message.register(switch_wallet_command, commands=["switch_wallet"])
-    dp.message.register(wallet_info_command, commands=["wallet_info"])
+    from aiogram.filters import Command
+    from aiogram.filters.callback_data import CallbackData
+    
+    dp.message.register(list_wallets_command, Command(commands=["wallets"]))
+    dp.message.register(switch_wallet_command, Command(commands=["switch_wallet"]))
+    dp.message.register(wallet_info_command, Command(commands=["wallet_info"]))
     dp.callback_query.register(switch_wallet_callback, lambda c: c.data.startswith("switch_to_") or c.data == "cancel_switch")
