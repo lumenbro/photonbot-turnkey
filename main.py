@@ -292,7 +292,22 @@ async def init_db_pool():
                 ) THEN
                     ALTER TABLE users ADD COLUMN migration_notified_at TIMESTAMP;
                 END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'legacy_public_key'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN legacy_public_key TEXT;
+                END IF;
             END $$;
+            
+            -- Populate legacy_public_key for existing migrated users
+            UPDATE users 
+            SET legacy_public_key = public_key 
+            WHERE source_old_db IS NOT NULL 
+            AND encrypted_s_address_secret IS NOT NULL
+            AND (legacy_public_key IS NULL OR legacy_public_key = '')
+            AND public_key IS NOT NULL;
             CREATE TABLE IF NOT EXISTS turnkey_wallets (
                 id BIGSERIAL PRIMARY KEY,
                 telegram_id BIGINT REFERENCES users(telegram_id) ON DELETE CASCADE,

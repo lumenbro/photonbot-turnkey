@@ -300,7 +300,7 @@ async def process_migration_export(callback: types.CallbackQuery, app_context):
         # Get user's encrypted S-address secret
         async with app_context.db_pool.acquire() as conn:
             user_data = await conn.fetchrow("""
-                SELECT encrypted_s_address_secret, public_key, pioneer_status
+                SELECT encrypted_s_address_secret, COALESCE(legacy_public_key, public_key) as public_key, pioneer_status
                 FROM users WHERE telegram_id = $1
             """, telegram_id)
             
