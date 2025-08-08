@@ -245,9 +245,13 @@ async def start_command(message: types.Message, app_context, streaming_service: 
                 # Show migration notification with export option
                 await show_migration_notification(message, user_data, app_context)
             else:
-                # Show normal welcome message
+                # Show normal welcome message with migration reminder
                 welcome_text = await generate_welcome_message(telegram_id, app_context)
-                await message.reply(welcome_text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+                
+                # Add migration reminder for legacy users
+                migration_reminder = "\n\n💡 **Migration Reminder:** You can export your old wallet keys or re-trigger migration options from the Wallet Management menu."
+                
+                await message.reply(welcome_text + migration_reminder, reply_markup=main_menu_keyboard, parse_mode="Markdown")
         else:
             # Regular user (not migrated)
             welcome_text = await generate_welcome_message(telegram_id, app_context)
@@ -363,19 +367,60 @@ async def process_migration_notified_later(callback: types.CallbackQuery, app_co
     
     try:
         async with app_context.db_pool.acquire() as conn:
+            # Mark as notified but allow re-triggering
             await conn.execute("""
-                UPDATE users SET migration_notified = TRUE 
+                UPDATE users SET migration_notified = TRUE, migration_notified_at = NOW()
                 WHERE telegram_id = $1
             """, telegram_id)
         
         await callback.message.reply(
             "✅ Got it! You can export your wallet keys anytime from the Wallet Management menu.\n\n"
-            "Use /start to access the main menu."
+            "Use /start to access the main menu.\n\n"
+            "💡 **Tip:** If you need to see the migration options again, use the Wallet Management menu."
         )
         
     except Exception as e:
         logger.error(f"Error marking migration as notified for user {telegram_id}: {e}")
         await callback.message.reply("❌ Error. Please try again.")
+    
+    await callback.answer()
+
+async def re_trigger_migration_notification(callback: types.CallbackQuery, app_context):
+    """Re-trigger migration notification for legacy users"""
+    telegram_id = callback.from_user.id
+    logger.info(f"Re-triggering migration notification for user {telegram_id}")
+    
+    try:
+        async with app_context.db_pool.acquire() as conn:
+            # Get user data for migration notification
+            user_data = await conn.fetchrow("""
+                SELECT public_key, pioneer_status, encrypted_s_address_secret
+                FROM users WHERE telegram_id = $1 AND source_old_db IS NOT NULL
+            """, telegram_id)
+            
+            if not user_data:
+                await callback.message.reply("❌ No legacy user data found.")
+                await callback.answer()
+                return
+            
+            # Reset migration notification flag to allow re-triggering
+            await conn.execute("""
+                UPDATE users SET migration_notified = FALSE, migration_notified_at = NULL
+                WHERE telegram_id = $1
+            """, telegram_id)
+            
+            # Show migration notification again
+            await show_migration_notification(callback.message, {
+                'telegram_id': telegram_id,
+                'public_key': user_data['public_key'],
+                'pioneer_status': user_data['pioneer_status']
+            }, app_context)
+            
+            await callback.message.reply("🔄 Migration notification re-triggered!")
+            
+    except Exception as e:
+        logger.error(f"Error re-triggering migration for user {telegram_id}: {e}")
+        await callback.message.reply("❌ Error re-triggering migration. Please try again.")
     
     await callback.answer()
 

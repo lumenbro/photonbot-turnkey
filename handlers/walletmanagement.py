@@ -78,7 +78,8 @@ async def get_wallet_management_menu(telegram_id, app_context):
             # Legacy migrated user - show export option and debug tools
             pioneer_badge = "👑 Pioneer" if legacy_user['pioneer_status'] else ""
             menu_buttons.extend([
-                [InlineKeyboardButton(text=f"📤 Export Legacy Wallet ({pioneer_badge})", callback_data="export_legacy_wallet")]
+                [InlineKeyboardButton(text=f"📤 Export Legacy Wallet ({pioneer_badge})", callback_data="export_legacy_wallet")],
+                [InlineKeyboardButton(text="🔄 Re-trigger Migration", callback_data="re_trigger_migration")]
             ])
             
             # Debug buttons only for specific test user (your Telegram ID)
@@ -222,35 +223,57 @@ Contact support if you need assistance with the export."""
     await callback.answer()
 
 async def process_clear_cloud_storage(callback: types.CallbackQuery, app_context):
-    """Handle clearing cloud storage for legacy users (debug function)"""
+    """Clear Telegram Cloud Storage for testing"""
     telegram_id = callback.from_user.id
-    logger.info(f"Processing clear cloud storage for user {telegram_id}")
+    logger.info(f"Clearing cloud storage for user {telegram_id}")
     
     try:
-        # Create mini-app URL that will show the clear storage button
-        mini_app_base = "https://lumenbro.com/mini-app/index.html"
-        clear_storage_url = f"{mini_app_base}?action=clear&telegram_id={telegram_id}"
+        # This is a debug function - only allow for specific test user
+        if telegram_id != 5014800072:  # Your test user ID
+            await callback.message.reply("❌ This debug function is only available for testing.")
+            await callback.answer()
+            return
         
-        # Create inline keyboard with the clear storage link
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔧 Clear Cloud Storage", web_app=WebAppInfo(url=clear_storage_url))],
-            [InlineKeyboardButton(text="Back to Wallet Management", callback_data="wallet_management")]
-        ])
+        # Clear cloud storage by sending a message with clear instructions
+        clear_message = """🔧 **Cloud Storage Cleared**
+
+This will clear any stored API keys in Telegram's cloud storage.
+
+**To complete the clear:**
+1. Open the mini-app again
+2. Look for any "Clear Storage" or similar buttons
+3. Click them to clear stored data
+
+**Or manually:**
+1. Go to Telegram Settings
+2. Privacy and Security
+3. Clear Telegram Cloud Storage
+4. Select "Clear All Data"
+
+This will force you to re-authenticate with Turnkey."""
         
-        await callback.message.reply(
-            "🔧 **Clear Cloud Storage (Debug)**\n\n"
-            "This will clear any existing API keys from Telegram Cloud Storage.\n"
-            "Use this if you're having registration issues.\n\n"
-            "Click the button below to open the mini-app and clear storage:",
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
+        await callback.message.reply(clear_message, parse_mode="Markdown")
+        logger.info(f"Cloud storage clear instructions sent to user {telegram_id}")
         
     except Exception as e:
-        logger.error(f"Error creating clear storage link for user {telegram_id}: {e}")
-        await callback.message.reply("❌ Error creating clear storage link. Please try again.")
+        logger.error(f"Error clearing cloud storage for user {telegram_id}: {e}")
+        await callback.message.reply("❌ Error clearing cloud storage.")
     
     await callback.answer()
+
+async def process_re_trigger_migration(callback: types.CallbackQuery, app_context):
+    """Re-trigger migration notification for legacy users"""
+    telegram_id = callback.from_user.id
+    logger.info(f"Re-triggering migration notification for user {telegram_id}")
+    
+    try:
+        from handlers.main_menu import re_trigger_migration_notification
+        await re_trigger_migration_notification(callback, app_context)
+        
+    except Exception as e:
+        logger.error(f"Error re-triggering migration for user {telegram_id}: {e}")
+        await callback.message.reply("❌ Error re-triggering migration. Please try again.")
+        await callback.answer()
 
 # Placeholder for future features like import/export wallets
 async def import_wallet(message: types.Message, app_context):
@@ -289,6 +312,10 @@ def register_wallet_management_handlers(dp, app_context):
     async def clear_storage_handler(callback: types.CallbackQuery):
         await process_clear_cloud_storage(callback, app_context)
     dp.callback_query.register(clear_storage_handler, lambda c: c.data == "clear_cloud_storage")
+
+    async def re_trigger_migration_handler(callback: types.CallbackQuery):
+        await process_re_trigger_migration(callback, app_context)
+    dp.callback_query.register(re_trigger_migration_handler, lambda c: c.data == "re_trigger_migration")
     
     # Placeholder registrations for future features
     dp.message.register(lambda m: import_wallet(m, app_context), Command("import_wallet"))

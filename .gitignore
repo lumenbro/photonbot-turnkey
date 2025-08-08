@@ -138,3 +138,35 @@ backup_sensitive_files/
 cleanup_for_commit.py
 scp_sensitive_data.py
 
+
+# Migration backups
+migration_backup_*/
+backup_sensitive_files/
+re_encrypted_users_*.csv
+production_migration_script.py
+local_proper_migration.py
+proper_migration_script.py
+restore_test_user.py
+debug_kms_decryption.py
+check_encryption_key.py
+analyze_migration_format.py
+simple_analyze_format.py
+decrypt_old_format.py
+test_current_data_format.py
+scp_sensitive_data.py
+
+# Migration backups
+migration_backup_*/
+backup_sensitive_files/
+re_encrypted_users_*.csv
+production_migration_script.py
+local_proper_migration.py
+proper_migration_script.py
+restore_test_user.py
+debug_kms_decryption.py
+check_encryption_key.py
+analyze_migration_format.py
+simple_analyze_format.py
+decrypt_old_format.py
+test_current_data_format.py
+scp_sensitive_data.py
