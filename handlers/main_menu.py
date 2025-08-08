@@ -517,6 +517,12 @@ We've upgraded our system to be more secure and user-friendly. Your old wallet d
 ✅ The export is encrypted
 ✅ You control your private key
 
+**Need more help?**
+Contact @lumenbrobot support in Telegram."""
+
+    await callback.message.reply(help_text, parse_mode="Markdown")
+    await callback.answer()
+
 async def delete_export_message(callback: types.CallbackQuery):
     """Delete the message containing sensitive S-address secrets"""
     try:
@@ -579,12 +585,6 @@ async def continue_turnkey_registration(callback: types.CallbackQuery, app_conte
         logger.error(f"Error continuing to Turnkey registration for user {telegram_id}: {e}")
         await callback.message.reply("❌ Error processing registration. Please try again or contact support.")
     
-    await callback.answer()
-
-**Need more help?**
-Contact @lumenbrobot support in Telegram."""
-
-    await callback.message.reply(help_text, parse_mode="Markdown")
     await callback.answer()
 
 async def cancel_command(message: types.Message, state: FSMContext):
