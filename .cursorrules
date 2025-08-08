@@ -1,0 +1,137 @@
+# PhotonBot Turnkey - Cursor Rules
+
+## AIOGRAM 3.X SYNTAX REQUIREMENTS
+⚠️ **CRITICAL**: This project uses aiogram 3.x, which has significant syntax changes from 2.x:
+
+### Command Registration (aiogram 3.x)
+```python
+# ❌ OLD (aiogram 2.x) - DO NOT USE
+dp.message.register(handler_function, commands=["command"])
+
+# ✅ NEW (aiogram 3.x) - USE THIS
+from aiogram.filters import Command
+dp.message.register(handler_function, Command(commands=["command"]))
+```
+
+### Callback Query Registration (aiogram 3.x)
+```python
+# ✅ CORRECT (aiogram 3.x)
+dp.callback_query.register(callback_function, lambda c: c.data.startswith("prefix_"))
+```
+
+### Message Types (aiogram 3.x)
+```python
+# ✅ CORRECT (aiogram 3.x)
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+```
+
+## PROJECT ARCHITECTURE
+
+### Database Schema
+- **users table**: Main user data with `telegram_id`, `public_key`, `legacy_public_key`, `migration_notified_at`
+- **turnkey_wallets table**: Turnkey wallet data with `telegram_id`, `turnkey_sub_org_id`, `turnkey_key_id`, `public_key`, `is_active`
+- **legacy users**: Users migrated from old bot with `source_old_db` and `encrypted_s_address_secret`
+
+### Key Services
+- **WalletManager**: Centralized wallet operations (`services/wallet_manager.py`)
+- **KMS Service**: AWS KMS decryption for legacy S-address secrets (`services/kms_service.py`)
+- **Price Service**: Cached price data (`services/price_service.py`)
+
+### Handler Structure
+- **main_menu.py**: Core bot logic, migration flows, safety checks
+- **wallet_commands.py**: Multi-wallet management commands (`/wallets`, `/switch_wallet`, `/wallet_info`)
+- **walletmanagement.py**: Wallet management menu options
+- **referrals.py**: Referral system
+- **copy_trading.py**: Copy trading functionality
+
+## SAFETY CHECKS & MIGRATION
+
+### Legacy User Protection
+- Legacy users cannot switch wallets (security restriction)
+- Legacy users get export-only access to old wallet
+- Safety checks prevent overwriting existing Turnkey wallets
+
+### Migration Flow
+1. User clicks "Re-trigger Migration" → Safety check prevents data loss
+2. User exports old wallet → KMS decrypts S-address secret
+3. User registers new Turnkey wallet → Node.js backend creates wallet
+4. User gets multi-wallet support (new users only)
+
+### Database Schema Updates
+- Use `DO $$` blocks for idempotent schema updates
+- Check `information_schema` before `ALTER TABLE`
+- Grant proper permissions to `botadmin` user
+
+## DEPLOYMENT WORKFLOW
+
+### Git Workflow (Preferred)
+```bash
+# Local development
+git add .
+git commit -m "descriptive message"
+git push origin main
+
+# Server deployment
+git pull origin main
+sudo systemctl restart photonbot-test
+```
+
+### Environment Variables
+- Database: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
+- AWS: `AWS_REGION`, `KMS_KEY_ID`
+- Telegram: `TELEGRAM_BOT_TOKEN`
+- Stellar: `FEE_WALLET`
+
+## TESTING GUIDELINES
+
+### Local Testing
+- Use Docker PostgreSQL for local testing
+- Mock AWS KMS for unit tests
+- Test both legacy and new user scenarios
+
+### Safety Testing
+- Verify migration button doesn't reset wallet data
+- Confirm Turnkey registration safety checks work
+- Test multi-wallet functionality for new users
+
+## ERROR HANDLING
+
+### Common Issues
+- **aiogram 3.x syntax**: Always use `Command()` filter, not `commands=` parameter
+- **Database permissions**: Grant `botadmin` proper privileges for schema updates
+- **KMS decryption**: Handle both old and new encryption formats
+- **Git conflicts**: Use `git stash` when pulling with local changes
+
+### Debugging
+- Check `journalctl -u photonbot-test.service -f` for logs
+- Use `logger.info()` for debugging KMS decryption
+- Verify database schema with `\d users` in psql
+
+## SECURITY CONSIDERATIONS
+
+### Sensitive Data
+- Never commit `.env` files or AWS credentials
+- Use KMS for encrypting sensitive data
+- Delete sensitive messages after export
+- Add `services/price_cache.json` to `.gitignore`
+
+### User Data Protection
+- Legacy users get export-only access
+- New users get multi-wallet support
+- Safety checks prevent accidental data loss
+- Clear separation between legacy and new user flows
+
+## FUTURE-PROOFING
+
+### Multi-Wallet Support
+- Implemented for new users
+- Legacy users restricted for security
+- Wallet switching via `/switch_wallet` command
+- Active wallet selection for trading
+
+### Node.js Integration
+- `auth.js` has existing wallet creation checks
+- `login.js` handles Turnkey session management
+- Python-side safety checks complement Node.js checks
+- No conflicts between Python and Node.js safety mechanisms
