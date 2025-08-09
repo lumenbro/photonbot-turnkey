@@ -51,11 +51,32 @@ class TrustlineStates(StatesGroup):
     waiting_for_asset_to_remove = State()
 
 
-welcome_text = """
-Welcome to @lumenbrobot!
+async def get_welcome_text(telegram_id, app_context):
+    """Get welcome text with session status indicator"""
+    try:
+        async with app_context.db_pool.acquire() as conn:
+            # Check session status
+            session_active = await conn.fetchval(
+                "SELECT session_expiry > NOW() FROM users WHERE telegram_id = $1", telegram_id
+            )
+            
+            # Session status indicator
+            if session_active:
+                status_text = "🟢 **Session Active** - Ready to trade!"
+            else:
+                status_text = "🔴 **Login Required** - Use Wallet Management to login"
+            
+            return f"""Welcome to @lumenbrobot!
 Trade assets on Stellar with ease.
-Use the buttons below to buy, sell, check balance, or manage copy trading.
-"""
+
+{status_text}
+
+Use the buttons below to buy, sell, check balance, or manage copy trading."""
+    except Exception:
+        # Fallback if database error
+        return """Welcome to @lumenbrobot!
+Trade assets on Stellar with ease.
+Use the buttons below to buy, sell, check balance, or manage copy trading."""
 
 main_menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Buy", callback_data="buy"),
@@ -251,11 +272,13 @@ async def start_command(message: types.Message, app_context, streaming_service: 
                 # Add migration reminder for legacy users
                 migration_reminder = "\n\n💡 **Migration Reminder:** You can export your old wallet keys or re-trigger migration options from the Wallet Management menu."
                 
-                await message.reply(welcome_text + migration_reminder, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+                dynamic_welcome = await get_welcome_text(telegram_id, app_context)
+                await message.reply(dynamic_welcome + migration_reminder, reply_markup=main_menu_keyboard, parse_mode="Markdown")
         else:
             # Regular user (not migrated)
             welcome_text = await generate_welcome_message(telegram_id, app_context)
-            await message.reply(welcome_text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+            dynamic_welcome = await get_welcome_text(telegram_id, app_context)
+            await message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
 
 async def show_migration_notification(message: types.Message, user_data, app_context):
     """Show migration notification to legacy users with export option"""
@@ -1323,7 +1346,8 @@ async def process_amount(message: types.Message, state: FSMContext, app_context)
         await message.reply(f"Error: {error_msg}")  # Add await here
     finally:
         await state.clear()
-        await message.reply(welcome_text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        dynamic_welcome = await get_welcome_text(message.from_user.id, app_context) 
+        await message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
 
 async def process_balance(message_or_callback: types.Message | types.CallbackQuery, app_context):
     # Handle both Message (from command) and CallbackQuery (from button)
@@ -1806,7 +1830,8 @@ async def process_add_trustline_asset(message: types.Message, state: FSMContext,
         await message.reply(f"Error adding trustline: {str(e)}")
     finally:
         await state.clear()
-        await message.reply(welcome_text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        dynamic_welcome = await get_welcome_text(message.from_user.id, app_context) 
+        await message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
 
 async def process_remove_trustline_asset(message: types.Message, state: FSMContext, app_context):
     asset_input = message.text.strip()
@@ -1823,7 +1848,8 @@ async def process_remove_trustline_asset(message: types.Message, state: FSMConte
         await message.reply(f"Error removing trustline: {str(e)}")
     finally:
         await state.clear()
-        await message.reply(welcome_text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        dynamic_welcome = await get_welcome_text(message.from_user.id, app_context) 
+        await message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
 
 async def process_wallet_management(app_context, callback: types.CallbackQuery):
     await process_wallet_management_callback(callback, app_context)       

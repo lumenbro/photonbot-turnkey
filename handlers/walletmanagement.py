@@ -104,8 +104,14 @@ async def process_wallet_management_callback(callback: types.CallbackQuery, app_
     await callback.message.reply(menu_text, reply_markup=keyboard)
     await callback.answer()
 
-async def process_main_menu_callback(callback: types.CallbackQuery):
-    await callback.message.reply(welcome_text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+async def process_main_menu_callback(callback: types.CallbackQuery, app_context=None):
+    # Use dynamic welcome text if app_context is available
+    if app_context:
+        from handlers.main_menu import get_welcome_text
+        dynamic_welcome = await get_welcome_text(callback.from_user.id, app_context)
+        await callback.message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+    else:
+        await callback.message.reply(welcome_text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
     await callback.answer()
 
 async def process_logout_callback(callback: types.CallbackQuery, app_context):
@@ -330,7 +336,9 @@ def register_wallet_management_handlers(dp, app_context):
         await process_wallet_management_callback(callback, app_context)
     dp.callback_query.register(wallet_management_handler, lambda c: c.data == "wallet_management")
     
-    dp.callback_query.register(process_main_menu_callback, lambda c: c.data == "main_menu")
+    async def main_menu_handler(callback: types.CallbackQuery):
+        await process_main_menu_callback(callback, app_context)
+    dp.callback_query.register(main_menu_handler, lambda c: c.data == "main_menu")
     
     async def logout_handler(callback: types.CallbackQuery):
         await process_logout_callback(callback, app_context)
