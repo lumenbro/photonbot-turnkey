@@ -107,15 +107,29 @@ class TurnkeySigner:
                 is_legacy = await wallet_manager.is_legacy_user(telegram_id)
                 
                 if is_legacy:
-                    # Legacy user - use users table for session data
-                    public_key = active_wallet
-                    sign_with = active_wallet
-                    # Get sub_org_id from users table or use default
-                    user_data = await conn.fetchrow(
-                        "SELECT turnkey_session_id FROM users WHERE telegram_id = $1",
-                        telegram_id
+                    # Legacy user - but check if they have a Turnkey wallet first
+                    wallet_data = await conn.fetchrow(
+                        "SELECT turnkey_sub_org_id, turnkey_key_id, public_key FROM turnkey_wallets WHERE telegram_id = $1 AND is_active = TRUE",
+                        int(telegram_id)
                     )
-                    sub_org_id = user_data["turnkey_session_id"] if user_data and user_data["turnkey_session_id"] else self.turnkey_org_id
+                    
+                    if wallet_data:
+                        # Legacy user with Turnkey wallet - use Turnkey wallet (mixed state user)
+                        sub_org_id = wallet_data["turnkey_sub_org_id"]
+                        sign_with = wallet_data["public_key"]
+                        public_key = wallet_data["public_key"]
+                        logger.info(f"Legacy user {telegram_id} using Turnkey wallet: org_id={sub_org_id}")
+                    else:
+                        # Pure legacy user - use users table for session data
+                        public_key = active_wallet
+                        sign_with = active_wallet
+                        # Get sub_org_id from users table or use default
+                        user_data = await conn.fetchrow(
+                            "SELECT turnkey_session_id FROM users WHERE telegram_id = $1",
+                            telegram_id
+                        )
+                        sub_org_id = user_data["turnkey_session_id"] if user_data and user_data["turnkey_session_id"] else self.turnkey_org_id
+                        logger.info(f"Pure legacy user {telegram_id} using session: org_id={sub_org_id}")
                 else:
                     # New user - use turnkey_wallets table
                     wallet_data = await conn.fetchrow(
