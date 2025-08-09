@@ -158,8 +158,12 @@ class TurnkeySigner:
                 if not session_data:
                     raise ValueError(f"Session data missing for telegram_id {telegram_id}. Recreate session via Node.js backend.")
                 
-                # Make session_expiry timezone-aware (assuming stored as UTC naive)
+                # Check if session exists
                 session_expiry = session_data["session_expiry"]
+                if session_expiry is None:
+                    raise ValueError(f"No active session for user {telegram_id}. Please login first using /login or Wallet Management.")
+                
+                # Make session_expiry timezone-aware (assuming stored as UTC naive)
                 if session_expiry.tzinfo is None:
                     session_expiry = session_expiry.replace(tzinfo=timezone.utc)
                 

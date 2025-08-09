@@ -1358,8 +1358,33 @@ async def process_amount(message: types.Message, state: FSMContext, app_context)
             raise ValueError("Invalid action")
     except Exception as e:
         logger.error(f"Error in {action}: {str(e)}", exc_info=True)
-        error_msg = str(e) if str(e) else "An unexpected error occurred during the transaction."
-        await message.reply(f"Error: {error_msg}")  # Add await here
+        
+        # Handle session-related errors gracefully
+        error_str = str(e)
+        if "No active session" in error_str or "Please login first" in error_str:
+            await message.reply(
+                "🔴 **Login Required**\n\n"
+                "You need to login before trading.\n\n"
+                "**How to Login:**\n"
+                "• Use `/login` command\n"
+                "• Or use Wallet Management → Login\n\n"
+                "This will establish a secure session for trading.",
+                parse_mode="Markdown"
+            )
+        elif "Session expired" in error_str:
+            await message.reply(
+                "⏰ **Session Expired**\n\n"
+                "Your trading session has expired.\n\n"
+                "**How to Renew:**\n"
+                "• Use `/login` command\n"
+                "• Or use Wallet Management → Login\n\n"
+                "This will create a new secure session.",
+                parse_mode="Markdown"
+            )
+        else:
+            # Generic error for other issues
+            error_msg = error_str if error_str else "An unexpected error occurred during the transaction."
+            await message.reply(f"Error: {error_msg}")
     finally:
         await state.clear()
         dynamic_welcome = await get_welcome_text(message.from_user.id, app_context) 

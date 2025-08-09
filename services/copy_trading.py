@@ -143,11 +143,33 @@ async def remove_zero_balance_trustlines(telegram_id, chat_id, app_context):
                 )
             except Exception as e:
                 logger.error(f"Failed to remove trustlines: {str(e)}")
-                await app_context.bot.send_message(
-                    chat_id,
-                    f"Failed to remove zero-balance trustlines: {html.escape(str(e))}",
-                    disable_web_page_preview=True
-                )
+                
+                # Handle session-related errors gracefully for copy trading
+                error_str = str(e)
+                if "No active session" in error_str or "Please login first" in error_str:
+                    await app_context.bot.send_message(
+                        chat_id,
+                        "🔴 **Copy Trading Login Required**\n\n"
+                        "Your trading session expired during copy trading.\n"
+                        "Use `/login` or Wallet Management to renew your session.",
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
+                    )
+                elif "Session expired" in error_str:
+                    await app_context.bot.send_message(
+                        chat_id,
+                        "⏰ **Copy Trading Session Expired**\n\n"
+                        "Your session expired during copy trading.\n"
+                        "Use `/login` or Wallet Management to renew.",
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
+                    )
+                else:
+                    await app_context.bot.send_message(
+                        chat_id,
+                        f"Failed to remove zero-balance trustlines: {html.escape(error_str)}",
+                        disable_web_page_preview=True
+                    )
         else:
             logger.debug("No zero-balance trustlines found to remove")
 
@@ -744,19 +766,49 @@ async def process_trade_signal(wallet, tx, chat_id, telegram_id, app_context):
 
         except Exception as e:
             error_msg = str(e) if str(e) else "Failed to submit transaction."
-            response = response if 'response' in locals() else {'hash': 'N/A'}
-            stellar_expert_link = f"https://stellar.expert/explorer/public/tx/{response.get('hash', 'N/A')}"
-            failure_msg = (
-                f"Copied trade from {wallet[-5:]}\n"
-                f"Original: Sent {original_send_amount or original_send_max} {send_asset_code}, for {original_dest_min or original_received} {dest_asset_code}\n"
-                f"Copied: Sent {(float(send_amount_final) if send_amount_final is not None else 0.0):.7f} {send_asset_code}, Target: {(float(dest_min_final) if dest_min_final is not None else 0.0):.7f} {dest_asset_code}\n"
-                f"Fee: 0.0000000 XLM (Network: Not applied, Service: Not applied)\n"
-                f"Tx: <a href='{stellar_expert_link}'>View on Explorer</a>\n"
-                f"Operation failed for wallet {wallet[-5:]}: {html.escape(error_msg)} This may be due to low liquidity; consider increasing slippage tolerance."
-            )
             logger.error(f"Error copying trade: {error_msg}")
-            await asyncio.wait_for(
-                app_context.bot.send_message(chat_id, failure_msg, parse_mode="HTML", disable_web_page_preview=True),
-                timeout=5
-            )
+            
+            # Handle session-related errors gracefully for copy trading
+            if "No active session" in error_msg or "Please login first" in error_msg:
+                failure_msg = (
+                    f"🔴 **Copy Trading Login Required**\n\n"
+                    f"Copy trade from {wallet[-5:]} failed: Session expired\n\n"
+                    f"**To Resume Copy Trading:**\n"
+                    f"• Use `/login` command\n"
+                    f"• Or use Wallet Management → Login\n\n"
+                    f"Copy trading will resume automatically after login."
+                )
+                await asyncio.wait_for(
+                    app_context.bot.send_message(chat_id, failure_msg, parse_mode="Markdown", disable_web_page_preview=True),
+                    timeout=5
+                )
+            elif "Session expired" in error_msg:
+                failure_msg = (
+                    f"⏰ **Copy Trading Session Expired**\n\n"
+                    f"Copy trade from {wallet[-5:]} failed: Session expired\n\n"
+                    f"**To Resume Copy Trading:**\n"
+                    f"• Use `/login` command\n"
+                    f"• Or use Wallet Management → Login\n\n"
+                    f"Copy trading will resume automatically after login."
+                )
+                await asyncio.wait_for(
+                    app_context.bot.send_message(chat_id, failure_msg, parse_mode="Markdown", disable_web_page_preview=True),
+                    timeout=5
+                )
+            else:
+                # Generic error for other issues
+                response = response if 'response' in locals() else {'hash': 'N/A'}
+                stellar_expert_link = f"https://stellar.expert/explorer/public/tx/{response.get('hash', 'N/A')}"
+                failure_msg = (
+                    f"Copied trade from {wallet[-5:]}\n"
+                    f"Original: Sent {original_send_amount or original_send_max} {send_asset_code}, for {original_dest_min or original_received} {dest_asset_code}\n"
+                    f"Copied: Sent {(float(send_amount_final) if send_amount_final is not None else 0.0):.7f} {send_asset_code}, Target: {(float(dest_min_final) if dest_min_final is not None else 0.0):.7f} {dest_asset_code}\n"
+                    f"Fee: 0.0000000 XLM (Network: Not applied, Service: Not applied)\n"
+                    f"Tx: <a href='{stellar_expert_link}'>View on Explorer</a>\n"
+                    f"Operation failed for wallet {wallet[-5:]}: {html.escape(error_msg)} This may be due to low liquidity; consider increasing slippage tolerance."
+                )
+                await asyncio.wait_for(
+                    app_context.bot.send_message(chat_id, failure_msg, parse_mode="HTML", disable_web_page_preview=True),
+                    timeout=5
+                )
             raise
