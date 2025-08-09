@@ -52,10 +52,13 @@ class TrustlineStates(StatesGroup):
 
 
 async def get_welcome_text(telegram_id, app_context):
-    """Get welcome text with session status indicator"""
+    """Get enhanced welcome text with session status indicator and wallet details"""
     try:
+        # Get the rich welcome message first
+        rich_welcome = await generate_welcome_message(telegram_id, app_context)
+        
+        # Check session status
         async with app_context.db_pool.acquire() as conn:
-            # Check session status
             session_active = await conn.fetchval(
                 "SELECT session_expiry > NOW() FROM users WHERE telegram_id = $1", telegram_id
             )
@@ -66,16 +69,32 @@ async def get_welcome_text(telegram_id, app_context):
             else:
                 status_text = "🔴 **Login Required** - Use `/login` or Wallet Management to login"
             
-            return f"""Welcome to @lumenbrobot!
+            # Insert session status after the welcome line but before wallet details
+            lines = rich_welcome.split('\n')
+            if len(lines) >= 2:
+                # Insert session status after the first two lines (title + subtitle)
+                lines.insert(2, f"\n{status_text}\n")
+                return '\n'.join(lines)
+            else:
+                # Fallback if format is unexpected
+                return f"{rich_welcome}\n\n{status_text}"
+                
+    except Exception as e:
+        # Fallback to basic message if any error
+        try:
+            async with app_context.db_pool.acquire() as conn:
+                session_active = await conn.fetchval(
+                    "SELECT session_expiry > NOW() FROM users WHERE telegram_id = $1", telegram_id
+                )
+                status_text = "🟢 **Session Active** - Ready to trade!" if session_active else "🔴 **Login Required** - Use `/login` or Wallet Management to login"
+        except:
+            status_text = ""
+            
+        return f"""Welcome to @lumenbrobot!
 Trade assets on Stellar with ease.
 
 {status_text}
 
-Use the buttons below to buy, sell, check balance, or manage copy trading."""
-    except Exception:
-        # Fallback if database error
-        return """Welcome to @lumenbrobot!
-Trade assets on Stellar with ease.
 Use the buttons below to buy, sell, check balance, or manage copy trading."""
 
 main_menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -267,8 +286,6 @@ async def start_command(message: types.Message, app_context, streaming_service: 
                 await show_migration_notification(message, user_data, app_context)
             else:
                 # Show normal welcome message with migration reminder
-                welcome_text = await generate_welcome_message(telegram_id, app_context)
-                
                 # Add migration reminder for legacy users
                 migration_reminder = "\n\n💡 **Migration Reminder:** You can export your old wallet keys or re-trigger migration options from the Wallet Management menu."
                 
@@ -276,7 +293,6 @@ async def start_command(message: types.Message, app_context, streaming_service: 
                 await message.reply(dynamic_welcome + migration_reminder, reply_markup=main_menu_keyboard, parse_mode="Markdown")
         else:
             # Regular user (not migrated)
-            welcome_text = await generate_welcome_message(telegram_id, app_context)
             dynamic_welcome = await get_welcome_text(telegram_id, app_context)
             await message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
 
