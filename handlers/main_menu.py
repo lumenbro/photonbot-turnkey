@@ -1271,6 +1271,17 @@ async def process_asset(message: types.Message, state: FSMContext):
 
 async def process_amount(message: types.Message, state: FSMContext, app_context):
     try:
+        # Check user access mode (normal vs recovery)
+        from utils.user_access import check_user_access, get_access_status_indicator
+        
+        user_id = message.from_user.id
+        org_id, access_mode, access_status = await check_user_access(user_id, app_context.db_pool)
+        
+        if not org_id:
+            await message.reply("❌ No wallet access. Use `/register` or `/recover <org_id>`.")
+            await state.clear()
+            return
+        
         data = await state.get_data()
         action = data['action']
         asset_code = data['asset_code']
@@ -1279,6 +1290,11 @@ async def process_amount(message: types.Message, state: FSMContext, app_context)
         if amount <= 0:
             raise ValueError("Amount must be positive")
 
+        # Add recovery mode note for trading
+        recovery_note = ""
+        if access_mode == "recovery":
+            recovery_note = f"\n\n🔓 **Recovery Mode Trading** {get_access_status_indicator(access_mode, access_status)}\n⚠️ You're in recovery mode (1-hour session).\nFor permanent access, create new Telegram keys at:\nhttps://lumenbro.com/recovery"
+
         if action == 'buy':
             response, actual_xlm_spent, actual_amount_received, actual_fee_paid, fee_percentage = await perform_buy(
                 message.from_user.id, app_context.db_pool, asset_code, asset_issuer, amount, app_context
@@ -1286,7 +1302,8 @@ async def process_amount(message: types.Message, state: FSMContext, app_context)
             await message.reply(
                 f"Buy successful. Bought {actual_amount_received:.7f} {asset_code} for {actual_xlm_spent:.7f} XLM\n"
                 f"Fee: {actual_fee_paid:.7f} XLM ({fee_percentage:.2f}%)\n"
-                f"Tx Hash: {response['hash']}"
+                f"Tx Hash: {response['hash']}{recovery_note}",
+                parse_mode="Markdown"
             )
         elif action == 'sell':
             response, actual_xlm_received, actual_amount_sent, actual_fee_paid, fee_percentage = await perform_sell(
@@ -1295,7 +1312,8 @@ async def process_amount(message: types.Message, state: FSMContext, app_context)
             await message.reply(
                 f"Sell successful. Sold {actual_amount_sent:.7f} {asset_code} for {actual_xlm_received:.7f} XLM\n"
                 f"Fee: {actual_fee_paid:.7f} XLM ({fee_percentage:.2f}%)\n"
-                f"Tx Hash: {response['hash']}"
+                f"Tx Hash: {response['hash']}{recovery_note}",
+                parse_mode="Markdown"
             )
         else:
             raise ValueError("Invalid action")
@@ -1321,6 +1339,27 @@ async def process_balance(message_or_callback: types.Message | types.CallbackQue
         logger.debug(f"Processing balance callback for user {user_id} via button")
 
     try:
+        # Check user access mode (normal vs recovery)
+        from utils.user_access import check_user_access, get_access_status_indicator
+        
+        org_id, access_mode, access_status = await check_user_access(user_id, app_context.db_pool)
+        
+        if not org_id:
+            await target.reply("""❌ **No Wallet Access**
+
+**New users:** Use `/register` to create a wallet
+**Existing users:** Use `/recover <org_id>` for emergency access
+
+**Lost access?** 
+1. Visit: https://lumenbro.com/recovery
+2. Enter your email → Get OTP → Get organization ID
+3. Return here: `/recover <your_org_id>`
+
+Need help? Contact @lumenbrobot support""", parse_mode="Markdown")
+            return
+        
+        status_indicator = get_access_status_indicator(access_mode, access_status)
+        
         logger.debug(f"Fetching public key for user {user_id}")
         public_key = await app_context.load_public_key(user_id)
         logger.debug(f"Public key retrieved: {public_key}")
@@ -1460,13 +1499,17 @@ async def process_balance(message_or_callback: types.Message | types.CallbackQue
             # Construct message without header
             logger.debug("Constructing final message")
             max_message_length = 4096
-            header = f"Your wallet: `{public_key}`\nYour balances:\n"
+            header = f"💰 **Wallet Balance** {status_indicator}\n\nYour wallet: `{public_key}`\nYour balances:\n"
             footer = ""
             if available_xlm < 0.1:
                 footer += f"\n\nYour available XLM is low ({available_xlm:.7f} XLM). Please fund your account to perform transactions."
             footer += zero_balance_note
             footer += total_value_text
             footer += additional_notes
+            
+            # Add recovery mode warning if applicable
+            if access_mode == "recovery":
+                footer += "\n\n⚠️ *Recovery mode active. Session expires in 1 hour.*"
 
             # Build content_text without the header
             content_text = f"{xlm_breakdown}\n\nOther Assets:\n{balance_text}" if balance_text else f"{xlm_breakdown}"
@@ -1499,9 +1542,11 @@ async def process_balance(message_or_callback: types.Message | types.CallbackQue
 
         except NotFoundError:
             logger.debug("Account not found, sending unfunded message")
+            recovery_warning = "\n\n⚠️ *Recovery mode active. Session expires in 1 hour.*" if access_mode == "recovery" else ""
             await target.reply(
+                f"💰 **Wallet Balance** {status_indicator}\n\n"
                 f"Your wallet: `{public_key}`\n"
-                f"Your account isn't funded yet. To activate it, send XLM to your public key from an exchange or wallet (e.g., Coinbase, Kraken, Lobstr).",
+                f"Your account isn't funded yet. To activate it, send XLM to your public key from an exchange or wallet (e.g., Coinbase, Kraken, Lobstr).{recovery_warning}",
                 parse_mode="Markdown"
             )
     except Exception as e:
@@ -1575,14 +1620,33 @@ async def process_withdraw_amount(message: types.Message, state: FSMContext):
 
 async def process_withdraw_confirmation(callback: types.CallbackQuery, state: FSMContext, app_context):
     if callback.data == "confirm_withdraw":
+        # Check user access mode (normal vs recovery)
+        from utils.user_access import check_user_access, get_access_status_indicator
+        
+        user_id = callback.from_user.id
+        org_id, access_mode, access_status = await check_user_access(user_id, app_context.db_pool)
+        
+        if not org_id:
+            await callback.message.reply("❌ No wallet access. Use `/register` or `/recover <org_id>`.")
+            await state.clear()
+            await callback.answer()
+            return
+        
         data = await state.get_data()
         asset = data['asset']
         amount = data['amount']
         destination = data['address']
+        
         try:
+            # Add recovery mode warning for payments
+            if access_mode == "recovery":
+                recovery_note = "\n\n🔓 **Recovery Mode Payment**\n⚠️ You're in recovery mode (1-hour session).\nFor permanent access, create new Telegram keys at:\nhttps://lumenbro.com/recovery"
+            else:
+                recovery_note = ""
+            
             from services.trade_services import perform_withdraw
             response = await perform_withdraw(callback.from_user.id, app_context.db_pool, asset, amount, destination, app_context)
-            await callback.message.reply(f"Withdrawal successful. Tx Hash: {response['hash']}")
+            await callback.message.reply(f"Withdrawal successful. Tx Hash: {response['hash']}{recovery_note}", parse_mode="Markdown")
         except Exception as e:
             await callback.message.reply(f"Withdrawal failed: {str(e)}")
     else:

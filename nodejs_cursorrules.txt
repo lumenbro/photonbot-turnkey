@@ -1,0 +1,258 @@
+# LumenBro Node.js Backend - Cursor Rules
+
+## 🎯 CRITICAL: SHARED DATABASE CONSISTENCY
+⚠️ **This Node.js project shares the same PostgreSQL database with the Python bot. Schema changes must be coordinated.**
+
+## DATABASE SCHEMA REQUIREMENTS
+
+### Users Table (Must Match Python)
+```sql
+CREATE TABLE IF NOT EXISTS users (
+    telegram_id BIGINT PRIMARY KEY,
+    public_key TEXT,
+    referral_code TEXT,
+    turnkey_user_id TEXT,
+    turnkey_session_id TEXT,
+    temp_api_public_key TEXT,
+    temp_api_private_key TEXT,
+    session_expiry TIMESTAMP,
+    kms_encrypted_session_key TEXT,
+    kms_key_id TEXT,
+    user_email TEXT,
+    session_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    source_old_db TEXT,                    -- Legacy migration flag
+    encrypted_s_address_secret TEXT,        -- Legacy S-address secret
+    migration_date TIMESTAMP,
+    pioneer_status BOOLEAN DEFAULT FALSE,
+    migration_notified BOOLEAN DEFAULT FALSE,
+    migration_notified_at TIMESTAMP,
+    legacy_public_key TEXT                 -- Old public key for legacy users
+);
+```
+
+### Turnkey Wallets Table (Must Match Python)
+```sql
+CREATE TABLE IF NOT EXISTS turnkey_wallets (
+    id BIGSERIAL PRIMARY KEY,
+    telegram_id BIGINT REFERENCES users(telegram_id) ON DELETE CASCADE,
+    turnkey_sub_org_id TEXT NOT NULL,
+    turnkey_key_id TEXT NOT NULL,
+    public_key TEXT NOT NULL UNIQUE,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(telegram_id, turnkey_key_id)
+);
+```
+
+## KMS INTEGRATION REQUIREMENTS
+
+### Shared KMS Configuration
+- **Key ID**: `27958fe3-0f3f-44d4-b21d-9d820d5ad96c`
+- **Region**: `us-west-1`
+- **Usage**: Encrypt session keys in Node.js, decrypt in Python bot
+
+### KMS Service Pattern
+```javascript
+// services/kmsService.js
+const AWS = require('aws-sdk');
+const kms = new AWS.KMS({ region: 'us-west-1' });
+
+class KMSService {
+  async encryptSessionKey(sessionKey) {
+    const params = {
+      KeyId: '27958fe3-0f3f-44d4-b21d-9d820d5ad96c',
+      Plaintext: Buffer.from(sessionKey, 'utf8')
+    };
+    const result = await kms.encrypt(params).promise();
+    return result.CiphertextBlob.toString('base64');
+  }
+}
+```
+
+## LEGACY USER SAFETY CHECKS
+
+### Wallet Creation Safety (auth.js)
+```javascript
+// ALWAYS check for existing wallets before creating new ones
+const existing = await pool.query(
+  "SELECT turnkey_sub_org_id, turnkey_key_id, public_key FROM turnkey_wallets WHERE telegram_id = $1 AND is_active = TRUE",
+  [telegram_id]
+);
+if (existing.rows.length > 0) {
+  console.log(`Existing sub-org found for ${telegram_id}`);
+  return { subOrgId: existing.rows[0].turnkey_sub_org_id, email };
+}
+```
+
+### Legacy User Detection
+```javascript
+// Check if user is legacy migrated
+const legacyUser = await pool.query(
+  "SELECT source_old_db, encrypted_s_address_secret FROM users WHERE telegram_id = $1 AND source_old_db IS NOT NULL",
+  [telegram_id]
+);
+```
+
+## MINI-APP INTEGRATION
+
+### Telegram InitData Validation
+```javascript
+function validateInitData(initData) {
+  const parsed = new URLSearchParams(initData);
+  const hash = parsed.get('hash');
+  parsed.delete('hash');
+  const dataCheckString = Array.from(parsed.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+  const computedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+  return computedHash === hash;
+}
+```
+
+## SESSION MANAGEMENT
+
+### Session Creation Pattern (login.js)
+```javascript
+// Store session data with KMS encryption
+const encryptedSessionKey = await kmsService.encryptSessionKey(sessionKey);
+await pool.query(
+  "UPDATE users SET kms_encrypted_session_key = $1, kms_key_id = $2, session_expiry = $3 WHERE telegram_id = $4",
+  [encryptedSessionKey, kmsKeyId, sessionExpiry, telegram_id]
+);
+```
+
+## CRITICAL PAIN POINTS
+
+### 1. Database Schema Synchronization
+- **NEVER** modify database schema without coordinating with Python bot
+- Use `DO $$` blocks for idempotent schema updates
+- Check `information_schema` before `ALTER TABLE`
+
+### 2. Legacy User Protection
+- **ALWAYS** check for existing wallets before creating new ones
+- Respect the same safety checks as Python bot
+- Never overwrite existing Turnkey wallet data
+
+### 3. KMS Key Consistency
+- **ALWAYS** use the same KMS key ID: `27958fe3-0f3f-44d4-b21d-9d820d5ad96c`
+- **NEVER** hardcode KMS keys in code
+- Use environment variables for KMS configuration
+
+### 4. Session Data Management
+- **ALWAYS** encrypt session keys before storing in database
+- **NEVER** store plaintext session keys
+- Use consistent encryption/decryption patterns
+
+## ENVIRONMENT VARIABLES
+
+### Required Environment Variables
+```bash
+# Database
+DB_HOST=lumenbro-turnkey.cz2imkksk7b4.us-west-1.rds.amazonaws.com
+DB_PORT=5434
+DB_NAME=postgres
+DB_USER=botadmin
+DB_PASSWORD=<password>
+
+# AWS
+AWS_REGION=us-west-1
+KMS_KEY_ID=27958fe3-0f3f-44d4-b21d-9d820d5ad96c
+
+# Telegram
+TELEGRAM_BOT_TOKEN=<bot_token>
+
+# Turnkey
+TURNKEY_API_PUBLIC_KEY=<public_key>
+TURNKEY_API_PRIVATE_KEY=<private_key>
+TURNKEY_ORGANIZATION_ID=<org_id>
+```
+
+## DEPLOYMENT CHECKLIST
+
+### Before Deploying Node.js Changes
+1. ✅ Verify database schema matches Python bot
+2. ✅ Test KMS encryption/decryption
+3. ✅ Verify legacy user safety checks
+4. ✅ Test session creation and storage
+5. ✅ Verify Turnkey API integration
+6. ✅ Test mini-app registration flow
+
+### After Deploying
+1. ✅ Monitor Python bot logs for session issues
+2. ✅ Verify legacy user migration flows
+3. ✅ Test wallet creation safety checks
+4. ✅ Monitor KMS usage and costs
+
+## COMMON ISSUES & SOLUTIONS
+
+### 1. Database Connection Issues
+- **Issue**: SSL certificate errors
+- **Solution**: Use `global-bundle.pem` for SSL context
+
+### 2. KMS Permission Errors
+- **Issue**: `AccessDenied` for KMS operations
+- **Solution**: Verify IAM role has proper KMS permissions
+
+### 3. Session Decryption Failures
+- **Issue**: Python bot can't decrypt session keys
+- **Solution**: Verify same KMS key ID and encryption format
+
+### 4. Legacy User Conflicts
+- **Issue**: Users getting duplicate wallets
+- **Solution**: Always check existing wallets before creation
+
+## COORDINATION WITH PYTHON BOT
+
+### Shared Responsibilities
+- **Node.js**: Wallet creation, session management, KMS encryption
+- **Python**: Trading operations, session decryption, legacy user handling
+
+### Critical Integration Points
+1. **Session Data**: Node.js encrypts, Python decrypts
+2. **Wallet Creation**: Node.js creates, Python uses for trading
+3. **Legacy Users**: Both respect same safety checks
+4. **Database Schema**: Both must use identical schema
+
+## ERROR HANDLING
+
+### Common Issues
+- **Database schema mismatches**: Always coordinate with Python bot
+- **KMS encryption failures**: Verify key ID and permissions
+- **Session creation errors**: Check Turnkey API responses
+- **Legacy user conflicts**: Always check existing wallets
+
+### Debugging
+- Check Node.js logs for KMS and database errors
+- Verify Python bot can decrypt session keys
+- Monitor Turnkey API responses for wallet creation
+- Test legacy user flows end-to-end
+
+## SECURITY CONSIDERATIONS
+
+### Sensitive Data
+- Never commit `.env` files or AWS credentials
+- Use KMS for encrypting session keys
+- Validate all Telegram initData
+- Secure Turnkey API key storage
+
+### User Data Protection
+- Legacy users get export-only access
+- New users get multi-wallet support
+- Safety checks prevent accidental data loss
+- Clear separation between legacy and new user flows
+
+## FUTURE-PROOFING
+
+### Multi-Wallet Support
+- Node.js creates wallets, Python manages switching
+- Legacy users restricted for security
+- Session management supports multiple wallets
+- Active wallet selection for trading
+
+### Python Integration
+- `auth.js` has existing wallet creation checks
+- `login.js` handles Turnkey session management
+- Node.js-side safety checks complement Python checks
+- No conflicts between Node.js and Python safety mechanisms

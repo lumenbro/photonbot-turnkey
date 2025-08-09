@@ -325,6 +325,35 @@ async def init_db_pool():
                 ) THEN
                     ALTER TABLE users ADD COLUMN legacy_public_key TEXT;
                 END IF;
+                
+                -- Add recovery support columns
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'recovery_mode'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN recovery_mode BOOLEAN DEFAULT FALSE;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'recovery_org_id'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN recovery_org_id TEXT;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'recovery_session_expires'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN recovery_session_expires TIMESTAMP;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'recovery_api_key_id'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN recovery_api_key_id TEXT;
+                END IF;
             END $$;
             
             -- Populate legacy_public_key for existing migrated users
@@ -506,6 +535,10 @@ async def run_master():
     register_referral_handlers(app_context.dp, app_context)
     register_wallet_management_handlers(app_context.dp, app_context)
     register_wallet_commands(app_context.dp, app_context)
+    
+    # Register recovery commands
+    from handlers.recovery import register_recovery_handlers
+    register_recovery_handlers(app_context.dp, app_context)
 
     await app_context.bot.delete_webhook(drop_pending_updates=True)
     logger.info("Dropped pending updates to prevent stale command processing")
