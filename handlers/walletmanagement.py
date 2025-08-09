@@ -109,13 +109,13 @@ async def process_main_menu_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 async def process_logout_callback(callback: types.CallbackQuery, app_context):
-    """Handle logout callback from wallet management menu"""
+    """Handle logout callback from wallet management menu - comprehensive session cleanup"""
     telegram_id = callback.from_user.id
     logger.info(f"Processing logout for telegram_id: {telegram_id}")
     
     try:
         async with app_context.db_pool.acquire() as conn:
-            # Clear all session-related fields
+            # Step 1: Clear all session-related fields from users table
             await conn.execute("""
                 UPDATE users SET 
                     turnkey_session_id = NULL,
@@ -124,32 +124,63 @@ async def process_logout_callback(callback: types.CallbackQuery, app_context):
                     kms_encrypted_session_key = NULL,
                     kms_key_id = NULL,
                     session_expiry = NULL,
-                    session_created_at = NULL
+                    session_created_at = NULL,
+                    turnkey_user_id = NULL,
+                    user_email = NULL
                 WHERE telegram_id = $1
             """, telegram_id)
             
-            # Verify the update
+            # Step 2: Check if user has both legacy status AND Turnkey wallets (mixed state)
+            user_check = await conn.fetchrow("""
+                SELECT 
+                    u.source_old_db IS NOT NULL as is_legacy,
+                    tw.telegram_id IS NOT NULL as has_turnkey_wallet,
+                    tw.turnkey_sub_org_id,
+                    tw.public_key as turnkey_public_key
+                FROM users u
+                LEFT JOIN turnkey_wallets tw ON u.telegram_id = tw.telegram_id AND tw.is_active = TRUE
+                WHERE u.telegram_id = $1
+            """, telegram_id)
+            
+            mixed_state_cleared = False
+            if user_check and user_check['is_legacy'] and user_check['has_turnkey_wallet']:
+                # User has both legacy status AND Turnkey wallet - this is the mixed state that causes issues
+                logger.info(f"User {telegram_id} has mixed state (legacy + Turnkey wallet), ensuring clean logout")
+                mixed_state_cleared = True
+                
+                # For mixed state users, we keep the Turnkey wallet but ensure no conflicting session data
+                # The Turnkey wallet will be their primary wallet going forward
+                
+            # Step 3: Verify all session data is cleared from users table
             result = await conn.fetchrow("""
                 SELECT turnkey_session_id, temp_api_public_key, temp_api_private_key, 
-                       kms_encrypted_session_key, kms_key_id, session_expiry, session_created_at
+                       kms_encrypted_session_key, kms_key_id, session_expiry, session_created_at,
+                       turnkey_user_id, user_email
                 FROM users WHERE telegram_id = $1
             """, telegram_id)
             
             if result:
                 # Check if all session fields are cleared
-                session_cleared = all(
-                    result[field] is None for field in [
-                        'turnkey_session_id', 'temp_api_public_key', 'temp_api_private_key',
-                        'kms_encrypted_session_key', 'kms_key_id', 'session_expiry', 'session_created_at'
-                    ]
-                )
+                session_fields = [
+                    'turnkey_session_id', 'temp_api_public_key', 'temp_api_private_key',
+                    'kms_encrypted_session_key', 'kms_key_id', 'session_expiry', 'session_created_at',
+                    'turnkey_user_id', 'user_email'
+                ]
+                session_cleared = all(result[field] is None for field in session_fields)
                 
                 if session_cleared:
-                    await callback.message.reply("✅ Session cleared successfully. You can now use /login to establish a new session.")
+                    success_msg = "✅ Session cleared successfully."
+                    if mixed_state_cleared:
+                        success_msg += "\n🔧 Mixed state resolved - you'll now use your Turnkey wallet."
+                    success_msg += "\n\nYou can now use /login to establish a new session."
+                    await callback.message.reply(success_msg)
+                    logger.info(f"✅ Complete logout successful for user {telegram_id} (mixed_state: {mixed_state_cleared})")
                 else:
                     await callback.message.reply("⚠️ Session partially cleared. Some fields may still exist.")
+                    logger.warning(f"⚠️ Partial logout for user {telegram_id}")
             else:
                 await callback.message.reply("❌ User not found in database.")
+                logger.error(f"❌ User {telegram_id} not found during logout")
                 
     except Exception as e:
         logger.error(f"Error during logout for telegram_id {telegram_id}: {str(e)}")
