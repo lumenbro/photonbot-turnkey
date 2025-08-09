@@ -64,7 +64,7 @@ async def get_welcome_text(telegram_id, app_context):
             if session_active:
                 status_text = "🟢 **Session Active** - Ready to trade!"
             else:
-                status_text = "🔴 **Login Required** - Use Wallet Management to login"
+                status_text = "🔴 **Login Required** - Use `/login` or Wallet Management to login"
             
             return f"""Welcome to @lumenbrobot!
 Trade assets on Stellar with ease.
