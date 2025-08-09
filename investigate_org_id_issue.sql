@@ -4,12 +4,12 @@
 
 -- 1. Check for the problematic organization ID in both tables
 SELECT 'USERS TABLE - turnkey_session_id' as source, 
-       telegram_id, 
+       telegram_id::text as telegram_id, 
        turnkey_session_id as org_id,
        public_key,
        source_old_db,
-       session_expiry,
-       kms_encrypted_session_key IS NOT NULL as has_kms_session
+       session_expiry::text,
+       (kms_encrypted_session_key IS NOT NULL)::text as has_kms_session
 FROM users 
 WHERE turnkey_session_id = 'ca28fe57-85c2-4649-9499-bd56404f473d'
 
@@ -100,12 +100,12 @@ WHERE u.turnkey_session_id IS NOT NULL OR tw.turnkey_sub_org_id IS NOT NULL;
 
 -- 8. Specific check: Find the user triggering the ca28fe57 org ID
 SELECT 'User causing the issue' as info,
-       telegram_id,
+       telegram_id::text,
        'Legacy path via turnkey_session_id' as source,
        turnkey_session_id as org_id,
        public_key,
-       session_expiry,
-       kms_encrypted_session_key IS NOT NULL as has_kms_session
+       session_expiry::text,
+       (kms_encrypted_session_key IS NOT NULL)::text as has_kms_session
 FROM users 
 WHERE turnkey_session_id = 'ca28fe57-85c2-4649-9499-bd56404f473d'
 
