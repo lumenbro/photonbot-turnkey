@@ -70,6 +70,7 @@ async def get_wallet_management_menu(telegram_id, app_context):
             menu_buttons.extend([
                 [InlineKeyboardButton(text="Login (Establish Session)", web_app=WebAppInfo(url=login_url))],
                 [InlineKeyboardButton(text="Recovery (Lost Device/Passkey)", web_app=WebAppInfo(url=recovery_url))],
+                [InlineKeyboardButton(text="📤 Export Wallet Keys", callback_data="export_turnkey_wallet")],
                 [InlineKeyboardButton(text="Check API Keys (Debug)", web_app=WebAppInfo(url=check_keys_url))],
                 [InlineKeyboardButton(text="Logout (Clear Session)", callback_data="logout")]
             ])
@@ -194,6 +195,86 @@ async def process_logout_callback(callback: types.CallbackQuery, app_context):
     
     await callback.answer()
 
+async def process_turnkey_wallet_export(callback: types.CallbackQuery, app_context):
+    """Handle Turnkey wallet export from wallet management menu"""
+    telegram_id = callback.from_user.id
+    logger.info(f"Processing Turnkey wallet export from menu for user {telegram_id}")
+    
+    try:
+        # Get user's Turnkey wallet data and email
+        async with app_context.db_pool.acquire() as conn:
+            wallet_data = await conn.fetchrow("""
+                SELECT tw.turnkey_sub_org_id, tw.public_key, u.user_email
+                FROM turnkey_wallets tw
+                LEFT JOIN users u ON tw.telegram_id = u.telegram_id
+                WHERE tw.telegram_id = $1 AND tw.is_active = TRUE
+            """, telegram_id)
+            
+            if not wallet_data:
+                await callback.message.reply("❌ No active Turnkey wallet found for export.")
+                await callback.answer()
+                return
+            
+            sub_org_id = wallet_data['turnkey_sub_org_id']
+            public_key = wallet_data['public_key']
+            email = wallet_data['user_email'] or "unknown@lumenbro.com"
+            
+            # Create export URL for mini-app
+            mini_app_base = "https://lumenbro.com/mini-app/index.html"
+            export_url = f"{mini_app_base}?action=export&orgId={sub_org_id}&email={email}"
+            
+            # Create inline keyboard for export
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="📱 Open Export Page", 
+                    web_app=WebAppInfo(url=export_url)
+                )],
+                [InlineKeyboardButton(
+                    text="❌ Cancel", 
+                    callback_data="cancel_export"
+                )]
+            ])
+            
+            export_message = f"""📤 **Turnkey Wallet Export**
+
+**Wallet Details:**
+• Public Key: `{public_key}`
+• Organization ID: `{sub_org_id}`
+• Email: `{email}`
+
+**🔐 What you'll get:**
+• Stellar private key (hex format)
+• S-address format
+• Backup file download
+• Compatible with all Stellar wallets
+
+**🔒 Security:**
+• Enter your password to decrypt API keys
+• Export happens client-side
+• Keys never leave your device
+• Your Turnkey passkey protects the export
+
+**⚠️ Important:**
+• Keep your exported keys secure
+• Anyone with these keys can access your funds
+• Store them offline in a safe location
+• This is for backup purposes only
+
+Click the button below to open the export page:"""
+
+            await callback.message.edit_text(
+                export_message, 
+                reply_markup=keyboard, 
+                parse_mode="Markdown"
+            )
+            logger.info(f"Successfully initiated Turnkey wallet export for user {telegram_id}")
+            
+    except Exception as e:
+        logger.error(f"Error initiating Turnkey wallet export for user {telegram_id}: {e}")
+        await callback.message.reply("❌ Error opening export page. Please try again or contact support.")
+    
+    await callback.answer()
+
 async def process_legacy_wallet_export(callback: types.CallbackQuery, app_context):
     """Handle legacy wallet export from wallet management menu"""
     telegram_id = callback.from_user.id
@@ -257,6 +338,11 @@ Contact support if you need assistance with the export."""
         logger.error(f"Error exporting legacy wallet for user {telegram_id}: {e}")
         await callback.message.reply("❌ Error exporting wallet. Please try again or contact support.")
     
+    await callback.answer()
+
+async def process_cancel_export(callback: types.CallbackQuery, app_context):
+    """Handle cancel export callback"""
+    await callback.message.edit_text("❌ Export cancelled.")
     await callback.answer()
 
 async def process_clear_cloud_storage(callback: types.CallbackQuery, app_context):
@@ -347,6 +433,14 @@ def register_wallet_management_handlers(dp, app_context):
     async def legacy_export_handler(callback: types.CallbackQuery):
         await process_legacy_wallet_export(callback, app_context)
     dp.callback_query.register(legacy_export_handler, lambda c: c.data == "export_legacy_wallet")
+    
+    async def turnkey_export_handler(callback: types.CallbackQuery):
+        await process_turnkey_wallet_export(callback, app_context)
+    dp.callback_query.register(turnkey_export_handler, lambda c: c.data == "export_turnkey_wallet")
+    
+    async def cancel_export_handler(callback: types.CallbackQuery):
+        await process_cancel_export(callback, app_context)
+    dp.callback_query.register(cancel_export_handler, lambda c: c.data == "cancel_export")
     
     async def clear_storage_handler(callback: types.CallbackQuery):
         await process_clear_cloud_storage(callback, app_context)
