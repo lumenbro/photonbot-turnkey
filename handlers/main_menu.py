@@ -847,7 +847,7 @@ async def register_command(message: types.Message, app_context, state: FSMContex
     # Check if user exists and if they are a legacy migrated user
     async with app_context.db_pool.acquire() as conn:
         user_data = await conn.fetchrow("""
-            SELECT telegram_id, source_old_db, pioneer_status, referral_code, referrer_id
+            SELECT telegram_id, source_old_db, pioneer_status, referral_code
             FROM users WHERE telegram_id = $1
         """, telegram_id)
         
@@ -857,8 +857,10 @@ async def register_command(message: types.Message, app_context, state: FSMContex
                 # Legacy user - skip referral code requirement and use existing data
                 logger.info(f"Legacy user {telegram_id} registering for new Turnkey wallet")
                 
-                # Use existing referral data if available
-                referrer_id = user_data['referrer_id']
+                # Get referrer_id from referrals table if user was referred
+                referrer_id = await conn.fetchval(
+                    "SELECT referrer_id FROM referrals WHERE referee_id = $1", telegram_id
+                )
                 referral_code = user_data['referral_code']
                 
                 # Generate JWT token for legacy user
