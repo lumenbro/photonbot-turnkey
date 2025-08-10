@@ -188,3 +188,4 @@ psql "host=lumenbro-turnkey.cz2imkksk7b4.us-west-1.rds.amazonaws.com port=5434 d
 **Status**: ✅ **IMPLEMENTED AND READY FOR DEPLOYMENT**
 
 The wallet export functionality is fully implemented in the Python bot. The mini-app needs to handle the `action=export` parameter to complete the user experience.
+

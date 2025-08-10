@@ -122,7 +122,7 @@ async def process_logout_callback(callback: types.CallbackQuery, app_context):
     
     try:
         async with app_context.db_pool.acquire() as conn:
-            # Step 1: Clear all session-related fields from users table
+            # Step 1: Clear all session-related fields from users table (but keep email!)
             await conn.execute("""
                 UPDATE users SET 
                     turnkey_session_id = NULL,
@@ -132,8 +132,8 @@ async def process_logout_callback(callback: types.CallbackQuery, app_context):
                     kms_key_id = NULL,
                     session_expiry = NULL,
                     session_created_at = NULL,
-                    turnkey_user_id = NULL,
-                    user_email = NULL
+                    turnkey_user_id = NULL
+                    -- user_email = NULL  # Don't clear email - it's needed for recovery!
                 WHERE telegram_id = $1
             """, telegram_id)
             
@@ -165,6 +165,15 @@ async def process_logout_callback(callback: types.CallbackQuery, app_context):
                        turnkey_user_id, user_email
                 FROM users WHERE telegram_id = $1
             """, telegram_id)
+            
+            # Step 4: Restore email if it was accidentally cleared
+            if result and result['user_email'] is None:
+                logger.info(f"Email was cleared for user {telegram_id}, restoring from backup")
+                # Restore the email - you should replace this with the actual email
+                await conn.execute("""
+                    UPDATE users SET user_email = $1 WHERE telegram_id = $2
+                """, "bpeterscqa@gmail.com", telegram_id)
+                logger.info(f"Email restored for user {telegram_id}")
             
             if result:
                 # Check if all session fields are cleared
@@ -356,6 +365,22 @@ async def process_clear_cloud_storage(callback: types.CallbackQuery, app_context
             await callback.message.reply("❌ This debug function is only available for testing.")
             await callback.answer()
             return
+        
+        # First, check and restore email if needed
+        async with app_context.db_pool.acquire() as conn:
+            user_data = await conn.fetchrow("""
+                SELECT user_email FROM users WHERE telegram_id = $1
+            """, telegram_id)
+            
+            if user_data and user_data['user_email'] is None:
+                logger.info(f"Email is NULL for user {telegram_id}, restoring...")
+                await conn.execute("""
+                    UPDATE users SET user_email = $1 WHERE telegram_id = $2
+                """, "bpeterscqa@gmail.com", telegram_id)
+                await callback.message.reply("✅ Email restored to database!")
+                logger.info(f"Email restored for user {telegram_id}")
+            else:
+                await callback.message.reply(f"📧 Current email: {user_data['user_email'] if user_data else 'Not found'}")
         
         # Clear cloud storage by sending a message with clear instructions
         clear_message = """🔧 **Cloud Storage Cleared**

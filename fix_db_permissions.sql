@@ -29,3 +29,5 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO botadmin;
 \dt+ users
 
 
+
+
