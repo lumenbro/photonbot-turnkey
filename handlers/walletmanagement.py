@@ -6,6 +6,8 @@ from aiogram.filters import Command
 from functools import partial
 import asyncio
 import logging
+import os
+import requests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,6 +31,15 @@ main_menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Wallet Management", callback_data="wallet_management")],
     [InlineKeyboardButton(text="Help/FAQ", callback_data="help_faq")]
 ])
+
+def logout_user_via_node(telegram_id: int) -> bool:
+    base = os.environ.get("NODE_BASE_URL", "http://50.18.29.37:3000")
+    r = requests.post(
+        f"{base}/api/session/logout",
+        json={"telegram_id": telegram_id},
+        timeout=10,
+    )
+    return r.ok and r.json().get("success") is True
 
 async def get_wallet_management_menu(telegram_id, app_context):
     async with app_context.db_pool.acquire() as conn:
@@ -116,92 +127,22 @@ async def process_main_menu_callback(callback: types.CallbackQuery, app_context=
     await callback.answer()
 
 async def process_logout_callback(callback: types.CallbackQuery, app_context):
-    """Handle logout callback from wallet management menu - comprehensive session cleanup"""
+    """Handle logout callback by delegating to Node.js session logout endpoint"""
     telegram_id = callback.from_user.id
-    logger.info(f"Processing logout for telegram_id: {telegram_id}")
-    
+    logger.info(f"Processing logout via Node for telegram_id: {telegram_id}")
+
     try:
-        async with app_context.db_pool.acquire() as conn:
-            # Step 1: Clear all session-related fields from users table (but keep email!)
-            await conn.execute("""
-                UPDATE users SET 
-                    turnkey_session_id = NULL,
-                    temp_api_public_key = NULL,
-                    temp_api_private_key = NULL,
-                    kms_encrypted_session_key = NULL,
-                    kms_key_id = NULL,
-                    session_expiry = NULL,
-                    session_created_at = NULL,
-                    turnkey_user_id = NULL
-                    -- user_email = NULL  # Don't clear email - it's needed for recovery!
-                WHERE telegram_id = $1
-            """, telegram_id)
-            
-            # Step 2: Check if user has both legacy status AND Turnkey wallets (mixed state)
-            user_check = await conn.fetchrow("""
-                SELECT 
-                    u.source_old_db IS NOT NULL as is_legacy,
-                    tw.telegram_id IS NOT NULL as has_turnkey_wallet,
-                    tw.turnkey_sub_org_id,
-                    tw.public_key as turnkey_public_key
-                FROM users u
-                LEFT JOIN turnkey_wallets tw ON u.telegram_id = tw.telegram_id AND tw.is_active = TRUE
-                WHERE u.telegram_id = $1
-            """, telegram_id)
-            
-            mixed_state_cleared = False
-            if user_check and user_check['is_legacy'] and user_check['has_turnkey_wallet']:
-                # User has both legacy status AND Turnkey wallet - this is the mixed state that causes issues
-                logger.info(f"User {telegram_id} has mixed state (legacy + Turnkey wallet), ensuring clean logout")
-                mixed_state_cleared = True
-                
-                # For mixed state users, we keep the Turnkey wallet but ensure no conflicting session data
-                # The Turnkey wallet will be their primary wallet going forward
-                
-            # Step 3: Verify all session data is cleared from users table
-            result = await conn.fetchrow("""
-                SELECT turnkey_session_id, temp_api_public_key, temp_api_private_key, 
-                       kms_encrypted_session_key, kms_key_id, session_expiry, session_created_at,
-                       turnkey_user_id, user_email
-                FROM users WHERE telegram_id = $1
-            """, telegram_id)
-            
-            # Step 4: Restore email if it was accidentally cleared
-            if result and result['user_email'] is None:
-                logger.info(f"Email was cleared for user {telegram_id}, restoring from backup")
-                # Restore the email - you should replace this with the actual email
-                await conn.execute("""
-                    UPDATE users SET user_email = $1 WHERE telegram_id = $2
-                """, "bpeterscqa@gmail.com", telegram_id)
-                logger.info(f"Email restored for user {telegram_id}")
-            
-            if result:
-                # Check if all session fields are cleared
-                session_fields = [
-                    'turnkey_session_id', 'temp_api_public_key', 'temp_api_private_key',
-                    'kms_encrypted_session_key', 'kms_key_id', 'session_expiry', 'session_created_at',
-                    'turnkey_user_id', 'user_email'
-                ]
-                session_cleared = all(result[field] is None for field in session_fields)
-                
-                if session_cleared:
-                    success_msg = "✅ Session cleared successfully."
-                    if mixed_state_cleared:
-                        success_msg += "\n🔧 Mixed state resolved - you'll now use your Turnkey wallet."
-                    success_msg += "\n\nYou can now use /login to establish a new session."
-                    await callback.message.reply(success_msg)
-                    logger.info(f"✅ Complete logout successful for user {telegram_id} (mixed_state: {mixed_state_cleared})")
-                else:
-                    await callback.message.reply("⚠️ Session partially cleared. Some fields may still exist.")
-                    logger.warning(f"⚠️ Partial logout for user {telegram_id}")
-            else:
-                await callback.message.reply("❌ User not found in database.")
-                logger.error(f"❌ User {telegram_id} not found during logout")
-                
+        success = await asyncio.to_thread(logout_user_via_node, telegram_id)
+        if success:
+            await callback.message.reply("✅ Session logout successful. You can now use /login to establish a new session.")
+            logger.info(f"✅ Node logout successful for user {telegram_id}")
+        else:
+            await callback.message.reply("⚠️ Logout request sent, but confirmation failed. Please try again or use /login.")
+            logger.warning(f"⚠️ Node logout returned unsuccessful for user {telegram_id}")
     except Exception as e:
-        logger.error(f"Error during logout for telegram_id {telegram_id}: {str(e)}")
-        await callback.message.reply("❌ Error clearing session. Please try again.")
-    
+        logger.error(f"Error during Node logout for telegram_id {telegram_id}: {str(e)}")
+        await callback.message.reply("❌ Error logging out. Please try again.")
+
     await callback.answer()
 
 async def process_turnkey_wallet_export(callback: types.CallbackQuery, app_context):
