@@ -137,8 +137,55 @@ async def process_logout_callback(callback: types.CallbackQuery, app_context):
             await callback.message.reply("✅ Session logout successful. You can now use /login to establish a new session.")
             logger.info(f"✅ Node logout successful for user {telegram_id}")
         else:
-            await callback.message.reply("⚠️ Logout request sent, but confirmation failed. Please try again or use /login.")
-            logger.warning(f"⚠️ Node logout returned unsuccessful for user {telegram_id}")
+            # Fallback verification: check DB session fields; if cleared, consider success
+            logger.warning(f"⚠️ Node logout returned unsuccessful for user {telegram_id}; verifying via DB")
+            try:
+                async with app_context.db_pool.acquire() as conn:
+                    result = await conn.fetchrow(
+                        """
+                        SELECT turnkey_session_id, temp_api_public_key, temp_api_private_key,
+                               kms_encrypted_session_key, kms_key_id, session_expiry, session_created_at
+                        FROM users WHERE telegram_id = $1
+                        """,
+                        telegram_id,
+                    )
+                if result:
+                    session_fields = [
+                        "turnkey_session_id",
+                        "temp_api_public_key",
+                        "temp_api_private_key",
+                        "kms_encrypted_session_key",
+                        "kms_key_id",
+                        "session_expiry",
+                        "session_created_at",
+                    ]
+                    cleared = all(result[field] is None for field in session_fields)
+                    if cleared:
+                        await callback.message.reply(
+                            "✅ Session logout successful. You can now use /login to establish a new session."
+                        )
+                        logger.info(
+                            f"✅ Session fields cleared in DB despite unsuccessful response for user {telegram_id}"
+                        )
+                    else:
+                        await callback.message.reply(
+                            "❌ Logout failed to confirm. Please try again in a moment."
+                        )
+                        logger.warning(
+                            f"❌ Session fields not cleared after logout attempt for user {telegram_id}"
+                        )
+                else:
+                    await callback.message.reply(
+                        "❌ Could not verify logout status. Please try again."
+                    )
+                    logger.error(f"❌ No user row found while verifying logout for {telegram_id}")
+            except Exception as verify_err:
+                logger.error(
+                    f"Error verifying logout via DB for telegram_id {telegram_id}: {str(verify_err)}"
+                )
+                await callback.message.reply(
+                    "❌ Error verifying logout. Please try again."
+                )
     except Exception as e:
         logger.error(f"Error during Node logout for telegram_id {telegram_id}: {str(e)}")
         await callback.message.reply("❌ Error logging out. Please try again.")
