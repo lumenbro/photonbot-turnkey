@@ -33,7 +33,7 @@ main_menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 def logout_user_via_node(telegram_id: int) -> bool:
-    base = os.environ.get("NODE_BASE_URL", "http://50.18.29.37:3000")
+    base = os.environ.get("NODE_BASE_URL", "http://172.31.14.115:3000")
     r = requests.post(
         f"{base}/api/session/logout",
         json={"telegram_id": telegram_id},

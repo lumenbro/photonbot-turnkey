@@ -1183,84 +1183,88 @@ async def confirm_unregister(callback: types.CallbackQuery, app_context, streami
         if f"confirm_unregister_{telegram_id}" in callback.data:
             logger.info(f"Proceeding with unregister for user {telegram_id}")
             async with app_context.db_pool.acquire() as conn:
-                # Clear session fields from users (but preserve migration data)
-                await conn.execute("""
-                    UPDATE users SET 
-                        turnkey_session_id = NULL, 
-                        temp_api_public_key = NULL, 
-                        temp_api_private_key = NULL, 
-                        kms_encrypted_session_key = NULL,
-                        kms_key_id = NULL,
-                        session_expiry = NULL,
-                        session_created_at = NULL,
-                        turnkey_user_id = NULL,
-                        user_email = NULL
-                    WHERE telegram_id = $1
-                """, telegram_id)
-                
-                # Note: We don't delete from users table to preserve migration data
-                # Only delete if user is not a migrated user
-                user_check = await conn.fetchrow("""
-                    SELECT source_old_db FROM users WHERE telegram_id = $1
-                """, telegram_id)
-                
-                if not user_check or not user_check['source_old_db']:
-                    # Only delete if not a migrated user
-                    await conn.execute("DELETE FROM users WHERE telegram_id = $1", telegram_id)
-                result = await conn.fetchval("SELECT telegram_id FROM users WHERE telegram_id = $1", telegram_id)
-                if result:
-                    logger.error(f"Deletion failed: User {telegram_id} still exists in database")
-                else:
-                    logger.info(f"User {telegram_id} successfully deleted from database")
+                async with conn.transaction():
+                    # 1) Clear session fields (optional but kept for partial unregister semantics)
+                    await conn.execute(
+                        """
+                        UPDATE users SET 
+                            turnkey_session_id = NULL, 
+                            temp_api_public_key = NULL, 
+                            temp_api_private_key = NULL, 
+                            kms_encrypted_session_key = NULL,
+                            kms_key_id = NULL,
+                            session_expiry = NULL,
+                            session_created_at = NULL,
+                            turnkey_user_id = NULL,
+                            user_email = NULL
+                        WHERE telegram_id = $1
+                        """,
+                        telegram_id,
+                    )
 
-                # Delete from turnkey_wallets (sub_org, key_id, etc.)
-                await conn.execute("DELETE FROM turnkey_wallets WHERE telegram_id = $1", telegram_id)
-                result = await conn.fetchval("SELECT telegram_id FROM turnkey_wallets WHERE telegram_id = $1", telegram_id)
-                if result:
-                    logger.error(f"Deletion failed: User {telegram_id} still exists in turnkey_wallets table")
-                else:
-                    logger.info(f"User {telegram_id} successfully deleted from turnkey_wallets table")
+                    # 2) DELETE dependents FIRST (order matters for FK NO ACTION)
+                    await conn.execute("DELETE FROM referrals WHERE referee_id = $1 OR referrer_id = $1", telegram_id)
+                    result = await conn.fetchval("SELECT referee_id FROM referrals WHERE referee_id = $1", telegram_id)
+                    if result:
+                        logger.error(f"Deletion failed: User {telegram_id} still exists in referrals table as referee")
+                    else:
+                        logger.info(f"User {telegram_id} successfully deleted from referrals table as referee")
+                    result = await conn.fetchval("SELECT referrer_id FROM referrals WHERE referrer_id = $1", telegram_id)
+                    if result:
+                        logger.error(f"Deletion failed: User {telegram_id} still exists in referrals table as referrer")
+                    else:
+                        logger.info(f"User {telegram_id} successfully deleted from referrals table as referrer")
 
-                await conn.execute("DELETE FROM trades WHERE user_id = $1", telegram_id)
-                result = await conn.fetchval("SELECT user_id FROM trades WHERE user_id = $1", telegram_id)
-                if result:
-                    logger.error(f"Deletion failed: User {telegram_id} still exists in trades table")
-                else:
-                    logger.info(f"User {telegram_id} successfully deleted from trades table")
+                    await conn.execute("DELETE FROM copy_trading WHERE user_id = $1", telegram_id)
+                    result = await conn.fetchval("SELECT user_id FROM copy_trading WHERE user_id = $1", telegram_id)
+                    if result:
+                        logger.error(f"Deletion failed: User {telegram_id} still exists in copy_trading table")
+                    else:
+                        logger.info(f"User {telegram_id} successfully deleted from copy_trading table")
 
-                await conn.execute("DELETE FROM rewards WHERE user_id = $1", telegram_id)
-                result = await conn.fetchval("SELECT user_id FROM rewards WHERE user_id = $1", telegram_id)
-                if result:
-                    logger.error(f"Deletion failed: User {telegram_id} still exists in rewards table")
-                else:
-                    logger.info(f"User {telegram_id} successfully deleted from rewards table")
+                    await conn.execute("DELETE FROM rewards WHERE user_id = $1", telegram_id)
+                    result = await conn.fetchval("SELECT user_id FROM rewards WHERE user_id = $1", telegram_id)
+                    if result:
+                        logger.error(f"Deletion failed: User {telegram_id} still exists in rewards table")
+                    else:
+                        logger.info(f"User {telegram_id} successfully deleted from rewards table")
 
-                await conn.execute("DELETE FROM copy_trading WHERE user_id = $1", telegram_id)
-                result = await conn.fetchval("SELECT user_id FROM copy_trading WHERE user_id = $1", telegram_id)
-                if result:
-                    logger.error(f"Deletion failed: User {telegram_id} still exists in copy_trading table")
-                else:
-                    logger.info(f"User {telegram_id} successfully deleted from copy_trading table")
+                    await conn.execute("DELETE FROM trades WHERE user_id = $1", telegram_id)
+                    result = await conn.fetchval("SELECT user_id FROM trades WHERE user_id = $1", telegram_id)
+                    if result:
+                        logger.error(f"Deletion failed: User {telegram_id} still exists in trades table")
+                    else:
+                        logger.info(f"User {telegram_id} successfully deleted from trades table")
 
-                await conn.execute("DELETE FROM referrals WHERE referee_id = $1 OR referrer_id = $1", telegram_id)
-                result = await conn.fetchval("SELECT referee_id FROM referrals WHERE referee_id = $1", telegram_id)
-                if result:
-                    logger.error(f"Deletion failed: User {telegram_id} still exists in referrals table as referee")
-                else:
-                    logger.info(f"User {telegram_id} successfully deleted from referrals table as referee")
-                result = await conn.fetchval("SELECT referrer_id FROM referrals WHERE referrer_id = $1", telegram_id)
-                if result:
-                    logger.error(f"Deletion failed: User {telegram_id} still exists in referrals table as referrer")
-                else:
-                    logger.info(f"User {telegram_id} successfully deleted from referrals table as referrer")
+                    await conn.execute("DELETE FROM founders WHERE telegram_id = $1", telegram_id)
+                    result = await conn.fetchval("SELECT telegram_id FROM founders WHERE telegram_id = $1", telegram_id)
+                    if result:
+                        logger.error(f"Deletion failed: User {telegram_id} still exists in founders table")
+                    else:
+                        logger.info(f"User {telegram_id} successfully deleted from founders table")
 
-                # Add deletion from the founders table
-                await conn.execute("DELETE FROM founders WHERE telegram_id = $1", telegram_id)
-                result = await conn.fetchval("SELECT telegram_id FROM founders WHERE telegram_id = $1", telegram_id)
-                if result:
-                    logger.error(f"Deletion failed: User {telegram_id} still exists in founders table")
-                else:
-                    logger.info(f"User {telegram_id} successfully deleted from founders table")
+                    # turnkey_wallets: keep explicit delete to be safe
+                    await conn.execute("DELETE FROM turnkey_wallets WHERE telegram_id = $1", telegram_id)
+                    result = await conn.fetchval("SELECT telegram_id FROM turnkey_wallets WHERE telegram_id = $1", telegram_id)
+                    if result:
+                        logger.error(f"Deletion failed: User {telegram_id} still exists in turnkey_wallets table")
+                    else:
+                        logger.info(f"User {telegram_id} successfully deleted from turnkey_wallets table")
+
+                    # 3) DELETE user only if not legacy (preserve migration data)
+                    user_check = await conn.fetchrow(
+                        """
+                        SELECT source_old_db FROM users WHERE telegram_id = $1
+                        """,
+                        telegram_id,
+                    )
+                    if not user_check or not user_check['source_old_db']:
+                        await conn.execute("DELETE FROM users WHERE telegram_id = $1", telegram_id)
+                        result = await conn.fetchval("SELECT telegram_id FROM users WHERE telegram_id = $1", telegram_id)
+                        if result:
+                            logger.error(f"Deletion failed: User {telegram_id} still exists in database")
+                        else:
+                            logger.info(f"User {telegram_id} successfully deleted from database")
 
             await streaming_service.stop_streaming(chat_id)
 
