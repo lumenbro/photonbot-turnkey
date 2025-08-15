@@ -275,6 +275,7 @@ async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, ap
     actual_fee_paid = Decimal('0.0')
     actual_xlm_spent = Decimal('0.0')
     actual_amount_received = Decimal('0.0')
+    xlm_debits = []  # Initialize the list to collect XLM debits
     
     for effect in effects_response["_embedded"]["records"]:
         if effect["type"] == "account_credited" and effect["account"] == app_context.fee_wallet and effect["asset_type"] == "native":
