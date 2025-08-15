@@ -113,7 +113,7 @@ class TurnkeySigner:
             # Use WalletManager to get active wallet
             from services.wallet_manager import WalletManager
             wallet_manager = WalletManager(self.app_context.db_pool)
-            active_wallet = await wallet_manager.get_active_wallet(telegram_id, app_context)
+            active_wallet = await wallet_manager.get_active_wallet(telegram_id, self.app_context)
             
             if not active_wallet:
                 # In TEST_MODE, fallback to users.public_key directly without Turnkey
