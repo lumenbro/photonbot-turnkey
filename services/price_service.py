@@ -170,6 +170,55 @@ class PriceService:
         logger.debug(f"Value: {value_in_xlm} XLM, ${value_in_usd} USD")
         return value_in_xlm, value_in_usd
 
+    async def get_asset_info(self, asset_code: str, asset_issuer: str):
+        """Fetch comprehensive asset information from Stellar Expert API"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"https://api.stellar.expert/explorer/public/asset/{asset_code}-{asset_issuer}"
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        logger.warning(f"Failed to fetch asset info: HTTP {response.status}")
+                        return None
+                    
+                    data = await response.json()
+                    
+                    # Get current price in XLM using existing method
+                    price_xlm = await self.fetch_asset_price_in_xlm(asset_code, asset_issuer)
+                    xlm_usd = await self.fetch_xlm_usd_price()
+                    price_usd = price_xlm * xlm_usd if xlm_usd > 0 else 0.0
+                    
+                    return {
+                        "asset_code": asset_code,
+                        "asset_issuer": asset_issuer,
+                        "name": data.get("name", asset_code),
+                        "domain": data.get("domain", ""),
+                        "price_usd": price_usd,
+                        "price_xlm": price_xlm,
+                        "market_cap_usd": data.get("market_cap", 0.0),
+                        "volume_24h": data.get("volume_24h", 0.0),
+                        "supply": data.get("supply", 0.0),
+                        "holders_count": data.get("holders_count", 0),
+                        "trustlines_count": data.get("trustlines_count", 0),
+                        "tags": data.get("tags", [])
+                    }
+                    
+        except Exception as e:
+            logger.error(f"Error fetching asset info from Stellar Expert: {e}")
+            return None
+
+    async def calculate_tokens_for_xlm(self, asset_code: str, asset_issuer: str, xlm_amount: float) -> float:
+        """Calculate approximate token amount for given XLM amount"""
+        try:
+            price_xlm = await self.fetch_asset_price_in_xlm(asset_code, asset_issuer)
+            if price_xlm > 0:
+                return xlm_amount / price_xlm
+            else:
+                # Fallback calculation if price is not available
+                return xlm_amount * 1000  # Placeholder: 1 XLM = 1000 tokens
+        except Exception as e:
+            logger.error(f"Error calculating tokens for XLM: {e}")
+            return xlm_amount * 1000  # Fallback
+
     async def shutdown(self):
         """Shut down the PriceService."""
         logger.debug("Shutting down PriceService")

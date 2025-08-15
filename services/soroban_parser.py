@@ -76,7 +76,7 @@ async def parse_soroban_transaction(tx, wallet, chat_id, telegram_id, app_contex
 
     tx_envelope = TransactionEnvelope.from_xdr(
         tx["envelope_xdr"],
-        network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE
+        network_passphrase=app_context.network_passphrase
     )
     operations = tx_envelope.transaction.operations
     soroban_ops = []

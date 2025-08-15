@@ -1,12 +1,32 @@
 from datetime import datetime
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
-async def check_user_access(telegram_id, db_pool):
+async def check_user_access(telegram_id, db_pool, app_context=None):
     """Check user access mode and return appropriate org_id"""
     try:
         async with db_pool.acquire() as conn:
+            # Check if we're in TEST_MODE
+            is_test_mode = app_context.is_test_mode if app_context else os.getenv('TEST_MODE', 'false').lower() == 'true'
+            
+            # In TEST_MODE, check if user has a public_key in users table
+            if is_test_mode:
+                user_data = await conn.fetchrow(
+                    """SELECT public_key FROM users WHERE telegram_id = $1""",
+                    telegram_id
+                )
+                
+                if user_data and user_data['public_key']:
+                    logger.info(f"TEST_MODE: User {telegram_id} has access via users.public_key")
+                    # Return a dummy org_id for TEST_MODE (not used for signing)
+                    return "test_mode_org", "normal", "active"
+                else:
+                    logger.warning(f"TEST_MODE: No public_key found for user {telegram_id}")
+                    return None, "No wallet found", None
+            
+            # Normal mode - check turnkey_wallets
             user_data = await conn.fetchrow(
                 """SELECT 
                     u.recovery_mode, 

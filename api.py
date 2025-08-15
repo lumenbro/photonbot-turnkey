@@ -63,7 +63,11 @@ async def api_auth_telegram(request):
     async with app_context.db_pool.acquire() as conn:
         user = await conn.fetchrow("SELECT telegram_id, public_key FROM users WHERE telegram_id = $1", int(telegram_id))
         if not user:
-            public_key, (encrypted_secret, encrypted_data_key) = await app_context.generate_keypair(telegram_id)
+            if callable(app_context.generate_keypair):
+                public_key, (encrypted_secret, encrypted_data_key) = await app_context.generate_keypair(telegram_id)
+            else:
+                # Fallback: no key generation, require pre-insert
+                raise web.HTTPInternalServerError(text='Key generation not configured')
             await conn.execute(
                 "INSERT INTO users (telegram_id, public_key, encrypted_secret, encrypted_data_key) VALUES ($1, $2, $3, $4)",
                 int(telegram_id), public_key, encrypted_secret, encrypted_data_key
@@ -203,7 +207,7 @@ async def start_server(app_context):
 
         web_app = web.Application(middlewares=[jwt_middleware])
         web_app['app_context'] = app_context
-        web_app['network_passphrase'] = 'Test SDF Network ; September 2015'
+        web_app['network_passphrase'] = app_context.network_passphrase
         web_app['fee_wallet'] = app_context.fee_wallet
         web_app['db_pool'] = app_context.db_pool
         web_app['sign_transaction'] = app_context.sign_transaction

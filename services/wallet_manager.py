@@ -1,4 +1,5 @@
 import logging
+import os
 import asyncpg
 from typing import List, Dict, Optional
 
@@ -8,17 +9,32 @@ class WalletManager:
     def __init__(self, db_pool):
         self.db_pool = db_pool
     
-    async def get_active_wallet(self, telegram_id: int) -> Optional[str]:
+    async def get_active_wallet(self, telegram_id: int, app_context=None) -> Optional[str]:
         """
         Get the active wallet for any user (legacy or new)
         
         Args:
             telegram_id: The user's Telegram ID
+            app_context: Optional AppContext for TEST_MODE check
             
         Returns:
             The public key of the active wallet, or None if no wallet found
         """
         async with self.db_pool.acquire() as conn:
+            # Check if we're in TEST_MODE
+            is_test_mode = app_context.is_test_mode if app_context else os.getenv('TEST_MODE', 'false').lower() == 'true'
+            
+            # In TEST_MODE, allow using users.public_key directly for all users
+            if is_test_mode:
+                row = await conn.fetchrow(
+                    """
+                    SELECT public_key FROM users WHERE telegram_id = $1
+                    """,
+                    telegram_id,
+                )
+                if row and row['public_key']:
+                    logger.info(f"TEST_MODE active wallet for {telegram_id}: {row['public_key']}")
+                    return row['public_key']
             # Check if legacy user first
             legacy_user = await conn.fetchrow("""
                 SELECT public_key FROM users 

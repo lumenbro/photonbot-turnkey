@@ -55,8 +55,11 @@ async def wait_for_transaction_confirmation(tx_hash, app_context, max_attempts=6
     raise ValueError(f"Transaction {tx_hash} not confirmed after {max_attempts} attempts")
 
 async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, app_context):
-    if not asset_issuer.startswith('G') or len(asset_issuer) != 56:
-        raise ValueError(f"Invalid issuer: {asset_issuer}")
+    """Perform a buy operation using path payments."""
+    logger.info(f"🔍 TEST_MODE DEBUG: Starting buy operation for user {telegram_id}")
+    logger.debug(f"🔍 TEST_MODE DEBUG: Asset: {asset_code}:{asset_issuer}, Amount: {amount}")
+    logger.debug(f"🔍 TEST_MODE DEBUG: Network: {app_context.network_passphrase}")
+    logger.debug(f"🔍 TEST_MODE DEBUG: Horizon URL: {app_context.horizon_url}")
     
     logger.info(f"Asset code: {asset_code}")
     
@@ -66,10 +69,15 @@ async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, ap
     native_asset = Asset.native()
     
     public_key = await app_context.load_public_key(telegram_id)
+    logger.debug(f"🔍 TEST_MODE DEBUG: User public key: {public_key}")
+    
     account = await load_account_async(public_key, app_context)
+    logger.debug(f"🔍 TEST_MODE DEBUG: Account loaded, sequence: {account['sequence']}")
 
     # Check if the trustline exists; if not, create it
     trustline_needed = not await has_trustline(account, asset)
+    logger.debug(f"🔍 TEST_MODE DEBUG: Trustline needed: {trustline_needed}")
+    
     if trustline_needed:
         logger.info(f"Adding trustline for {asset_code}:{asset_issuer} for user {telegram_id}")
         available_xlm = calculate_available_xlm(account)
@@ -79,6 +87,7 @@ async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, ap
         
         operations = [ChangeTrust(asset=asset, limit="1000000000.0")]
         try:
+            logger.debug(f"🔍 TEST_MODE DEBUG: Creating trustline transaction")
             response, xdr = await build_and_submit_transaction(
                 telegram_id, db_pool, operations, app_context, memo=f"Add Trust {asset_code}"
             )
@@ -86,12 +95,14 @@ async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, ap
             logger.info(f"Trustline for {asset_code}:{asset_issuer} created successfully")
             # Reload the account to update the sequence number and balances
             account = await load_account_async(public_key, app_context)
+            logger.debug(f"🔍 TEST_MODE DEBUG: Account reloaded, new sequence: {account['sequence']}")
         except Exception as e:
             logger.error(f"Failed to add trustline for {asset_code}:{asset_issuer}: {str(e)}", exc_info=True)
             raise ValueError(f"Failed to create trustline for {asset_code}: {str(e)}")
     
     available_xlm = calculate_available_xlm(account)
     logger.info(f"User balance: {available_xlm} XLM (available)")
+    logger.debug(f"🔍 TEST_MODE DEBUG: Available XLM: {available_xlm}")
     
     dest_amount = Decimal(str(amount)).quantize(Decimal('0.0000001'))
     dest_amount_str = format(dest_amount, 'f')
@@ -99,6 +110,7 @@ async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, ap
         raise ValueError(f"Invalid amount to buy: {dest_amount}")
     
     fee = await calculate_fee_and_check_balance(app_context, telegram_id, asset, float(dest_amount))
+    logger.debug(f"🔍 TEST_MODE DEBUG: Calculated fee: {fee}")
     
     builder = StrictReceivePathsCallBuilder(
         horizon_url=app_context.horizon_url,
@@ -109,18 +121,26 @@ async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, ap
     ).limit(10)
     
     logger.info(f"Querying paths: {builder.horizon_url}/paths/strict-receive with params: {builder.params}")
+    logger.debug(f"🔍 TEST_MODE DEBUG: Path query URL: {builder.horizon_url}/paths/strict-receive")
+    logger.debug(f"🔍 TEST_MODE DEBUG: Path query params: {builder.params}")
+    
     paths_response = await builder.call()
     logger.info(f"Paths response: {paths_response}")
+    logger.debug(f"🔍 TEST_MODE DEBUG: Paths response keys: {list(paths_response.keys()) if isinstance(paths_response, dict) else 'Not a dict'}")
     
     paths_response = await builder.call()
     logger.info(f"Paths response: {paths_response}")
     
     paths = paths_response.get("_embedded", {}).get("records", [])
+    logger.debug(f"🔍 TEST_MODE DEBUG: Found {len(paths)} paths")
+    
     if not paths:
         raise ValueError(f"No paths found to buy {dest_amount} {asset_code} with XLM - insufficient liquidity")
     
     # Filter paths to only those where source_asset_type is 'native'
     paths = [p for p in paths if p["source_asset_type"] == "native"]
+    logger.debug(f"🔍 TEST_MODE DEBUG: {len(paths)} paths after filtering for native source")
+    
     if not paths:
         raise ValueError(f"No viable paths found using native XLM to buy {dest_amount} {asset_code} - insufficient liquidity")
     
@@ -130,6 +150,7 @@ async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, ap
     for path in paths:
         max_source_amount = Decimal(path["source_amount"])
         logger.info(f"Evaluating path with source amount: {max_source_amount} XLM (hops: {len(path['path'])})")
+        logger.debug(f"🔍 TEST_MODE DEBUG: Path details: {path}")
         
         # Updated: Handle native assets in the path
         path_assets = [native_asset]  # Start with XLM (source)
@@ -145,6 +166,8 @@ async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, ap
             for i in range(len(path_assets) - 1):
                 selling_asset = path_assets[i]
                 buying_asset = path_assets[i + 1]
+                logger.debug(f"🔍 TEST_MODE DEBUG: Checking liquidity for {selling_asset.code} -> {buying_asset.code}")
+                
                 order_book_builder = OrderbookCallBuilder(
                     horizon_url=app_context.horizon_url,
                     client=app_context.client,
@@ -257,9 +280,16 @@ async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, ap
         if effect["type"] == "account_credited" and effect["account"] == app_context.fee_wallet and effect["asset_type"] == "native":
             actual_fee_paid = Decimal(effect["amount"])
         if effect["type"] == "account_debited" and effect["account"] == public_key and effect["asset_type"] == "native":
-            actual_xlm_spent = Decimal(effect["amount"])
+            # Collect all XLM debits from user account
+            xlm_debits.append(Decimal(effect["amount"]))
         if effect["type"] == "account_credited" and effect["account"] == public_key and effect.get("asset_code") == asset_code and effect.get("asset_issuer") == asset_issuer:
             actual_amount_received = Decimal(effect["amount"])
+    
+    # The largest XLM debit should be the actual trade amount (fee is smaller)
+    if xlm_debits:
+        xlm_debits.sort(reverse=True)  # Sort in descending order
+        actual_xlm_spent = xlm_debits[0]  # Take the largest debit
+        logger.info(f"Found XLM debits: {xlm_debits}, using largest: {actual_xlm_spent}")
     
     if actual_fee_paid == 0:
         logger.warning(f"Could not determine actual fee paid for transaction {response['hash']}, using adjusted fee: {adjusted_fee}")
@@ -274,6 +304,8 @@ async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, ap
         actual_amount_received = dest_amount
     
     logger.info(f"Actual fee paid: {actual_fee_paid:.7f} XLM (Fee percentage: {fee_percentage * 100:.2f}%)")
+    logger.info(f"Actual XLM spent: {actual_xlm_spent:.7f} XLM")
+    logger.info(f"Actual amount received: {actual_amount_received:.7f} {asset_code}")
     
     await log_xlm_volume(telegram_id, float(actual_xlm_spent), response["hash"], db_pool)
     
@@ -462,6 +494,8 @@ async def perform_sell(telegram_id, db_pool, asset_code, asset_issuer, amount, a
         actual_amount_sent = float(send_amount)
     
     logger.info(f"Actual fee paid: {actual_fee_paid:.7f} XLM (Fee percentage: {fee_percentage * 100:.2f}%)")
+    logger.info(f"Actual XLM received: {actual_xlm_received:.7f} XLM")
+    logger.info(f"Actual amount sent: {actual_amount_sent:.7f} {asset_code}")
     
     await log_xlm_volume(telegram_id, actual_xlm_received, response["hash"], db_pool)
     

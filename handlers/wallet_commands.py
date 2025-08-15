@@ -140,7 +140,7 @@ async def wallet_info_command(message: types.Message, app_context):
     wallet_manager = WalletManager(app_context.db_pool)
     
     try:
-        active_wallet = await wallet_manager.get_active_wallet(telegram_id)
+        active_wallet = await wallet_manager.get_active_wallet(telegram_id, app_context)
         
         if not active_wallet:
             await message.reply("❌ No active wallet found. Please register a wallet first.")

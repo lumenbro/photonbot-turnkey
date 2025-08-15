@@ -92,6 +92,7 @@ def sign_transaction(request, aws_credentials=None):
             logger.error("Public key mismatch")
             return {"error": "Public key mismatch"}
         
+        # For local mock, default to PUBLIC unless app provides otherwise
         tx_envelope = TransactionEnvelope.from_xdr(transaction_xdr, network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE)
         tx_envelope.sign(kp)
         signed_xdr = tx_envelope.to_xdr()

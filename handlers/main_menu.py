@@ -9,7 +9,7 @@ from stellar_sdk import Asset, PathPaymentStrictReceive, ChangeTrust, Payment, K
 from stellar_sdk.exceptions import NotFoundError
 from handlers.copy_trading import copy_trade_menu_command
 from services.streaming import StreamingService
-from services.trade_services import perform_buy, perform_sell
+from services.trade_services import perform_buy, perform_sell, calculate_available_xlm
 from services.referrals import log_xlm_volume, calculate_referral_shares, export_unpaid_rewards, daily_payout
 from globals import is_founder
 import secrets
@@ -36,6 +36,12 @@ class RegisterStates(StatesGroup):
 class BuySellStates(StatesGroup):
     waiting_for_asset = State()
     waiting_for_amount = State()
+    buy_menu_displayed = State()
+    waiting_for_custom_amount = State()
+    waiting_for_save_custom_amount = State()  # New state for saving custom amounts
+    sell_asset_selection = State()  # New state for sell asset selection
+    sell_menu_displayed = State()   # New state for sell menu display
+    waiting_for_sell_percentage = State()  # New state for custom sell percentage
 
 class WithdrawStates(StatesGroup):
     waiting_for_asset = State()
@@ -96,6 +102,42 @@ Trade assets on Stellar with ease.
 {status_text}
 
 Use the buttons below to buy, sell, check balance, or manage copy trading."""
+
+async def get_custom_amount(telegram_id: int, db_pool) -> float:
+    """Get user's saved custom XLM amount from database"""
+    try:
+        async with db_pool.acquire() as conn:
+            custom_amount = await conn.fetchval(
+                "SELECT custom_amount FROM users WHERE telegram_id = $1", telegram_id
+            )
+            return float(custom_amount) if custom_amount else None
+    except Exception as e:
+        logger.error(f"Error getting custom amount for user {telegram_id}: {e}")
+        return None
+
+async def save_custom_amount(telegram_id: int, amount: float, db_pool):
+    """Save user's custom XLM amount to database"""
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET custom_amount = $1 WHERE telegram_id = $2", 
+                amount, telegram_id
+            )
+            logger.info(f"Saved custom XLM amount {amount} for user {telegram_id}")
+    except Exception as e:
+        logger.error(f"Error saving custom amount for user {telegram_id}: {e}")
+
+async def clear_custom_amount(telegram_id: int, db_pool):
+    """Clear user's saved custom XLM amount from database"""
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET custom_amount = NULL WHERE telegram_id = $1", 
+                telegram_id
+            )
+            logger.info(f"Cleared custom XLM amount for user {telegram_id}")
+    except Exception as e:
+        logger.error(f"Error clearing custom amount for user {telegram_id}: {e}")
 
 main_menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Buy", callback_data="buy"),
@@ -916,7 +958,7 @@ async def register_command(message: types.Message, app_context, state: FSMContex
             if len(parts) > 1:
                 args = parts[1]
                 if 'ref-' in args:
-                    referral_code = args.split('ref-')[1]
+                    referral_code = args  # Keep the full code including 'ref-' prefix
                 else:
                     referral_code = args.strip()
 
@@ -952,7 +994,34 @@ async def register_command(message: types.Message, app_context, state: FSMContex
         'exp': time.time() + 600  # 10min expiry
     }, jwt_secret, algorithm='HS256')
 
-    # Send link button (to lumenbro.com or local for test)
+    # In TEST_MODE, bypass mini-app and register local test wallet
+    if app_context.is_test_mode:
+        try:
+            from stellar_sdk import Keypair
+            test_secret = os.getenv('TEST_SIGNER_SECRET')
+            if not test_secret:
+                await message.reply("TEST_MODE detected but TEST_SIGNER_SECRET is missing.")
+            else:
+                test_public = Keypair.from_secret(test_secret).public_key
+                async with app_context.db_pool.acquire() as conn:
+                    exists = await conn.fetchval("SELECT 1 FROM users WHERE telegram_id = $1", telegram_id)
+                    if not exists:
+                        await conn.execute(
+                            "INSERT INTO users (telegram_id, public_key, referral_code) VALUES ($1, $2, $3)",
+                            telegram_id, test_public, f"ref-api-{telegram_id}"
+                        )
+                    else:
+                        await conn.execute(
+                            "UPDATE users SET public_key = $1 WHERE telegram_id = $2",
+                            test_public, telegram_id
+                        )
+                await message.reply("Test mode: wallet registered locally. You can proceed without the mini-app.")
+        except Exception as e:
+            await message.reply(f"Test mode registration failed: {str(e)}")
+        await state.clear()
+        return
+
+    # Send link button (to lumenbro.com in production)
     mini_app_url = f"https://lumenbro.com/mini-app/index.html?action=register&referrer_id={referrer_id or ''}"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Link Telegram to Turnkey", web_app=WebAppInfo(url=mini_app_url))]
@@ -1007,7 +1076,34 @@ async def process_referral_code(message: types.Message, state: FSMContext, app_c
         'exp': time.time() + 600  # 10min expiry
     }, jwt_secret, algorithm='HS256')
 
-    # Send link button (to lumenbro.com or local for test)
+    # In TEST_MODE, bypass mini-app and register local test wallet
+    if app_context.is_test_mode:
+        try:
+            from stellar_sdk import Keypair
+            test_secret = os.getenv('TEST_SIGNER_SECRET')
+            if not test_secret:
+                await message.reply("TEST_MODE detected but TEST_SIGNER_SECRET is missing.")
+            else:
+                test_public = Keypair.from_secret(test_secret).public_key
+                async with app_context.db_pool.acquire() as conn:
+                    exists = await conn.fetchval("SELECT 1 FROM users WHERE telegram_id = $1", telegram_id)
+                    if not exists:
+                        await conn.execute(
+                            "INSERT INTO users (telegram_id, public_key, referral_code) VALUES ($1, $2, $3)",
+                            telegram_id, test_public, f"ref-api-{telegram_id}"
+                        )
+                    else:
+                        await conn.execute(
+                            "UPDATE users SET public_key = $1 WHERE telegram_id = $2",
+                            test_public, telegram_id
+                        )
+                await message.reply("Test mode: wallet registered locally. You can proceed without the mini-app.")
+        except Exception as e:
+            await message.reply(f"Test mode registration failed: {str(e)}")
+        await state.clear()
+        return
+
+    # Send link button (to lumenbro.com in production)
     mini_app_url = f"https://lumenbro.com/mini-app/index.html?action=register&referrer_id={referrer_id or ''}"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Link Telegram to Turnkey", web_app=WebAppInfo(url=mini_app_url))]
@@ -1293,26 +1389,53 @@ async def confirm_unregister(callback: types.CallbackQuery, app_context, streami
         await callback.message.edit_text(f"Error during unregistration: {str(e)}")
     await callback.answer()
 
-async def process_buy_sell(callback: types.CallbackQuery, state: FSMContext):
+async def process_buy_sell(callback: types.CallbackQuery, state: FSMContext, app_context):
+    """Enhanced buy/sell handler - enhanced buy flow, enhanced sell flow"""
     logger.info(f"Processing buy/sell callback: {callback.data}")
+    logger.info(f"Callback from user_id: {callback.from_user.id}")
     action = callback.data
-    await state.update_data(action=action)
-    await callback.message.reply(f"Please enter the asset code and issuer for {action} in the format: code:issuer")
-    await state.set_state(BuySellStates.waiting_for_asset)
+    
+    if action == 'buy':
+        await state.update_data(action=action)
+        await callback.message.reply(
+            "Please enter the asset code and issuer for buying in the format: `code:issuer`\n\n"
+            "**Example:** `USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN`",
+            parse_mode="Markdown"
+        )
+        await state.set_state(BuySellStates.waiting_for_asset)
+    elif action == 'sell':
+        # Enhanced sell flow with asset selection
+        await state.update_data(action=action)
+        logger.info(f"About to call show_sell_asset_selection for user_id: {callback.from_user.id}")
+        await show_sell_asset_selection(callback.message, app_context, state, callback.from_user.id)
+    
     await callback.answer()
 
-async def process_asset(message: types.Message, state: FSMContext):
+async def process_asset(message: types.Message, state: FSMContext, app_context):
+    """Enhanced asset processing with buy menu for buy actions only"""
     asset_input = message.text.strip()
     try:
         code, issuer = asset_input.split(':')
         if not issuer.startswith('G') or len(issuer) != 56:
             raise ValueError("Issuer must be a valid Stellar public key")
+        
         await state.update_data(asset_code=code, asset_issuer=issuer)
-        await message.reply("Enter the amount to buy/sell:")
-        await state.set_state(BuySellStates.waiting_for_amount)
+        
+        # Get current action
+        data = await state.get_data()
+        action = data.get('action', 'buy')
+        
+        if action == 'buy':
+            # Enhanced buy flow with menu
+            await show_buy_menu(message, code, issuer, app_context, state)
+        else:
+            # Keep existing simple flow for sell
+            await message.reply("Enter the amount to sell:")
+            await state.set_state(BuySellStates.waiting_for_amount)
+        
     except ValueError as e:
         logger.error(f"Invalid asset format: {str(e)}", exc_info=True)
-        await message.reply(f"Invalid format: {str(e)}. Use: code:issuer")
+        await message.reply(f"Invalid format: {str(e)}. Use: `code:issuer`", parse_mode="Markdown")
 
 async def process_amount(message: types.Message, state: FSMContext, app_context):
     try:
@@ -1320,7 +1443,7 @@ async def process_amount(message: types.Message, state: FSMContext, app_context)
         from utils.user_access import check_user_access, get_access_status_indicator
         
         user_id = message.from_user.id
-        org_id, access_mode, access_status = await check_user_access(user_id, app_context.db_pool)
+        org_id, access_mode, access_status = await check_user_access(user_id, app_context.db_pool, app_context)
         
         if not org_id:
             await message.reply("❌ No wallet access. Use `/register` or `/recover <org_id>`.")
@@ -1695,7 +1818,7 @@ async def process_withdraw_confirmation(callback: types.CallbackQuery, state: FS
         from utils.user_access import check_user_access, get_access_status_indicator
         
         user_id = callback.from_user.id
-        org_id, access_mode, access_status = await check_user_access(user_id, app_context.db_pool)
+        org_id, access_mode, access_status = await check_user_access(user_id, app_context.db_pool, app_context)
         
         if not org_id:
             await callback.message.reply("❌ No wallet access. Use `/register` or `/recover <org_id>`.")
@@ -1750,7 +1873,7 @@ async def manual_payout_command(message: types.Message, app_context):
         await message.reply("You are not authorized to use this command.")
         return
     chat_id = message.chat.id
-    await daily_payout(app_context.db_pool, app_context.db_pool, app_context.bot, chat_id, app_context)
+    await daily_payout(app_context.db_pool, app_context.bot, chat_id, app_context)
 
 async def rankings_command(message: types.Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1766,10 +1889,16 @@ async def help_faq_command(message: types.Message):
         "and earn rewards by inviting friends.\n\n"
         "*How do I start?*\n"
         "Use /start to check your wallet or begin registration. You'll get a dedicated wallet for bot trading.\n\n"
+        "*🚀 NEW: Enhanced Trading Commands*\n"
+        "• **`/buy`** - Enhanced buy with XLM amounts & market data\n"
+        "• **`/sell`** - Enhanced sell with asset selection & percentages\n"
+        "• **`/balance`** - Check wallet balance & asset values\n\n"
         "*How much are fees?*\n"
         "1% of all transactions for direct registration 10% discount if referred, wallet ranking report service is free. (dedicated Horizon and RPC servers are being used in both bot and walletrank)\n\n"
         "*What can I do?*\n"
-        "- *Buy/Sell*: Trade assets like USDC, SHX, ETH (use buttons after /start).\n"
+        "- *Buy/Sell*: Trade assets with enhanced menus (use `/buy` or `/sell` commands).\n"
+        "- *Enhanced Buy*: XLM amounts, market data, custom amounts with persistence.\n"
+        "- *Enhanced Sell*: Asset selection, percentage-based selling, market info.\n"
         "- *Check Balance*: View your XLM and asset balances, includes reserve calculation and net available XLM.\n"
         "- *Copy Trading*: Streams transactions from any G-address wallet with Horizon AIOHTTP and copies the trade. Multiplier, fixed-amount and slippage settings supported per copied wallet.\n"
         "- *Withdraw*: Send XLM or assets to another Stellar address.\n"
@@ -1790,6 +1919,7 @@ async def help_faq_command(message: types.Message):
         "*Tips*:\n"
         "- Never share your mnemonic.\n"
         "- Use /removetrust to free up XLM from unused trustlines.\n"
+        "- Use `/buy` and `/sell` for enhanced trading experience.\n"
         "- Check /help anytime for guidance.\n\n"
         "- For better wallet managment import mnemonic into Xbull or Lobstr and use the bot as a trading tool.\n\n"
         "*What Soroban functions are supported?*:\n"
@@ -1906,14 +2036,42 @@ def register_main_handlers(dp, app_context, streaming_service):
         await start_command(message, app_context, streaming_service, state)
     dp.message.register(start_handler, Command("start"))
 
+    # Buy and Sell command handlers
+    async def buy_command_handler(message: types.Message, state: FSMContext):
+        await buy_command(message, state, app_context)
+    dp.message.register(buy_command_handler, Command("buy"))
+    
+    async def sell_command_handler(message: types.Message, state: FSMContext):
+        await sell_command(message, state, app_context)
+    dp.message.register(sell_command_handler, Command("sell"))
+
     dp.message.register(cancel_command, Command("cancel"))
 
     async def register_handler(message: types.Message, state: FSMContext):
         await register_command(message, app_context, state)
     dp.message.register(register_handler, Command("register"))
 
-    dp.callback_query.register(process_buy_sell, lambda c: c.data in ["buy", "sell"])
-    dp.message.register(process_asset, BuySellStates.waiting_for_asset)
+    async def buy_sell_handler(callback: types.CallbackQuery, state: FSMContext):
+        await process_buy_sell(callback, state, app_context)
+    dp.callback_query.register(buy_sell_handler, lambda c: c.data in ["buy", "sell"])
+    
+    # Enhanced buy menu handlers
+    async def buy_menu_callback_handler(callback: types.CallbackQuery, state: FSMContext):
+        await handle_buy_menu_callback(callback, state, app_context)
+    dp.callback_query.register(
+        buy_menu_callback_handler,
+        lambda c: c.data.startswith("qb:") or c.data in ["ca", "rf", "back_to_main", "insufficient", "clear_ca"]
+    )
+    
+    # Asset processing handlers
+    async def asset_handler(message: types.Message, state: FSMContext):
+        await process_asset(message, state, app_context)
+    dp.message.register(asset_handler, BuySellStates.waiting_for_asset)
+    
+    # Custom amount handler
+    async def custom_amount_handler(message: types.Message, state: FSMContext):
+        await process_custom_amount(message, state, app_context)
+    dp.message.register(custom_amount_handler, BuySellStates.waiting_for_custom_amount)
 
     async def amount_handler(message: types.Message, state: FSMContext):
         await process_amount(message, state, app_context)
@@ -1935,6 +2093,12 @@ def register_main_handlers(dp, app_context, streaming_service):
     async def copy_trading_handler(callback: types.CallbackQuery):
         await process_copy_trading_callback(callback, app_context, streaming_service)
     dp.callback_query.register(copy_trading_handler, lambda c: c.data == "copy_trading")
+
+    # Referrals handler
+    async def referrals_handler(callback: types.CallbackQuery, state: FSMContext):
+        from handlers.referrals import referrals_menu
+        await referrals_menu(callback, app_context, state)
+    dp.callback_query.register(referrals_handler, lambda c: c.data == "wallets")
 
     async def unregister_handler(message: types.Message):
         await unregister_command(message, app_context, streaming_service)
@@ -2034,3 +2198,970 @@ def register_main_handlers(dp, app_context, streaming_service):
     async def logout_handler(message: types.Message):
         await logout_command(message, app_context)
     dp.message.register(logout_handler, Command("logout"))
+
+    # Custom amount handler
+    async def custom_amount_handler(message: types.Message, state: FSMContext):
+        await process_custom_amount(message, state, app_context)
+    dp.message.register(custom_amount_handler, BuySellStates.waiting_for_custom_amount)
+
+    # Enhanced sell menu handlers
+    async def sell_menu_callback_handler(callback: types.CallbackQuery, state: FSMContext):
+        await handle_sell_menu_callback(callback, state, app_context)
+    dp.callback_query.register(
+        sell_menu_callback_handler,
+        lambda c: c.data.startswith("sell_pct:") or c.data in ["sell_custom_pct", "sell_refresh", "sell_back_to_assets"]
+    )
+    
+    # Sell asset selection handlers
+    async def sell_asset_selection_handler(callback: types.CallbackQuery, state: FSMContext):
+        await handle_sell_asset_selection(callback, state, app_context)
+    dp.callback_query.register(
+        sell_asset_selection_handler,
+        lambda c: c.data.startswith("sa:")
+    )
+    
+    # Custom sell percentage handler
+    async def custom_sell_percentage_handler(message: types.Message, state: FSMContext):
+        await process_custom_sell_percentage(message, state, app_context)
+    dp.message.register(custom_sell_percentage_handler, BuySellStates.waiting_for_sell_percentage)
+
+async def show_buy_menu(message: types.Message, asset_code: str, asset_issuer: str, app_context, state: FSMContext):
+    """Show the enhanced buy menu with asset info and quick buy options"""
+    
+    # Fetch asset information from Stellar Expert using PriceService
+    asset_info = await app_context.price_service.get_asset_info(asset_code, asset_issuer)
+    
+    # Get user's XLM balance
+    public_key = await app_context.load_public_key(message.from_user.id)
+    account = await load_account_async(public_key, app_context)
+    available_xlm = calculate_available_xlm(account)
+    
+    logger.info(f"Creating buy menu for {asset_code}:{asset_issuer}, available XLM: {available_xlm}")
+    
+    # Create menu text
+    menu_text = create_buy_menu_text(asset_info, asset_code, asset_issuer, available_xlm)
+    
+    # Create keyboard with specified XLM amounts
+    keyboard = await create_buy_menu_keyboard(asset_code, asset_issuer, available_xlm, message.from_user.id, app_context)
+    
+    # Delete the asset input message to clean up the chat
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete asset input message: {e}")
+    
+    # Use send_message instead of reply since we deleted the original message
+    await message.bot.send_message(message.chat.id, menu_text, reply_markup=keyboard, parse_mode="Markdown")
+    await state.set_state(BuySellStates.buy_menu_displayed)
+
+def create_buy_menu_text(asset_info, asset_code: str, asset_issuer: str, available_xlm: float) -> str:
+    """Create the text for the buy menu using PriceService data"""
+    
+    text = f"**Buy {asset_code}** — ({asset_info.get('name', asset_code) if asset_info else asset_code})\n"
+    text += f"`{asset_issuer}`\n\n"
+    
+    if asset_info:
+        # Market data section using PriceService data
+        text += "**📊 Market Data:**\n"
+        if asset_info.get('price_usd'):
+            text += f"• Price: ${asset_info['price_usd']:.8f}\n"
+        if asset_info.get('price_xlm'):
+            text += f"• Price: {asset_info['price_xlm']:.8f} XLM\n"
+        if asset_info.get('market_cap_usd'):
+            text += f"• Market Cap: ${asset_info['market_cap_usd']:,.0f}\n"
+        if asset_info.get('volume_24h'):
+            text += f"• 24h Volume: ${asset_info['volume_24h']:,.0f}\n"
+        if asset_info.get('supply'):
+            text += f"• Supply: {asset_info['supply']:,.0f}\n"
+        
+        if asset_info.get('domain'):
+            text += f"• Domain: {asset_info['domain']}\n"
+        if asset_info.get('tags'):
+            text += f"• Tags: {', '.join(asset_info['tags'])}\n"
+    
+    # User balance
+    text += f"\n**💰 Your Balance:** {available_xlm:.7f} XLM\n\n"
+    
+    # Quick buy preview using PriceService
+    if asset_info and asset_info.get('price_xlm') and asset_info['price_xlm'] > 0:
+        tokens_per_xlm = 1 / asset_info['price_xlm']
+        text += f"**💡 Quick Buy Preview:**\n"
+        text += f"1 XLM ≈ {tokens_per_xlm:,.0f} {asset_code}\n\n"
+    
+    text += "**Select an amount to buy:**"
+    
+    return text
+
+async def create_buy_menu_keyboard(asset_code: str, asset_issuer: str, available_xlm: float, telegram_id: int, app_context) -> InlineKeyboardMarkup:
+    """Create the keyboard for the buy menu with specified XLM amounts"""
+    
+    # Specified XLM amounts (25, 50, 100, 200)
+    quick_amounts = [25, 50, 100, 200]
+    
+    logger.info(f"Creating keyboard with amounts: {quick_amounts}, available XLM: {available_xlm}")
+    
+    # Get user's saved custom amount
+    custom_amount = await get_custom_amount(telegram_id, app_context.db_pool)
+    
+    # Create keyboard rows
+    keyboard_rows = []
+    
+    # Quick buy buttons (2 per row for better visibility)
+    for i in range(0, len(quick_amounts), 2):
+        row = []
+        for j in range(2):
+            if i + j < len(quick_amounts):
+                amount = quick_amounts[i + j]
+                # Check if user can afford this amount
+                can_afford = amount <= available_xlm
+                button_text = f"{amount} XLM"
+                if not can_afford:
+                    button_text += " (insufficient)"
+                
+                logger.info(f"Creating button: {button_text}, can_afford: {can_afford}")
+                
+                # Use shorter callback data to avoid BUTTON_DATA_INVALID error
+                # Store asset info in state instead of callback data
+                row.append(InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f"qb:{amount}" if can_afford else "insufficient"
+                ))
+        keyboard_rows.append(row)
+    
+    # Custom amount button with checkmark if saved
+    custom_button_text = "💰 Custom Amount"
+    if custom_amount:
+        custom_button_text = f"✅ {custom_amount} XLM"
+    
+    # Custom amount and navigation buttons
+    keyboard_rows.extend([
+        [InlineKeyboardButton(text=custom_button_text, callback_data="ca")]
+    ])
+    
+    # Add clear custom amount button if there's a saved amount
+    if custom_amount:
+        keyboard_rows.append([InlineKeyboardButton(text="🗑️ Clear Custom Amount", callback_data="clear_ca")])
+    
+    keyboard_rows.extend([
+        [InlineKeyboardButton(text="🔄 Refresh", callback_data="rf")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")]
+    ])
+    
+    logger.info(f"Created keyboard with {len(keyboard_rows)} rows, custom amount: {custom_amount}")
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+async def handle_buy_menu_callback(callback: types.CallbackQuery, state: FSMContext, app_context):
+    """Handle callbacks from the buy menu"""
+    try:
+        data = callback.data
+        
+        if data.startswith("qb:"):
+            # Handle quick buy with XLM amounts
+            _, xlm_amount = data.split(":")
+            # Get asset info from state
+            state_data = await state.get_data()
+            asset_code = state_data.get('asset_code')
+            asset_issuer = state_data.get('asset_issuer')
+            
+            if asset_code and asset_issuer:
+                await handle_quick_buy_xlm(callback, asset_code, asset_issuer, float(xlm_amount), app_context)
+            else:
+                await callback.message.reply("❌ Asset information not found. Please try again.")
+        
+        elif data == "insufficient":
+            # Handle insufficient balance case
+            await callback.message.reply("❌ Insufficient XLM balance for this amount. Please select a smaller amount or add more XLM to your wallet.")
+            
+        elif data == "ca":
+            # Handle custom amount input
+            logger.info(f"Custom amount button clicked for user {callback.from_user.id}")
+            
+            # Get asset info from state
+            state_data = await state.get_data()
+            asset_code = state_data.get('asset_code')
+            asset_issuer = state_data.get('asset_issuer')
+            
+            logger.info(f"Asset info from state: {asset_code}:{asset_issuer}")
+            
+            if asset_code and asset_issuer:
+                # Check if user has a saved custom amount
+                custom_amount = await get_custom_amount(callback.from_user.id, app_context.db_pool)
+                logger.info(f"Retrieved custom amount: {custom_amount}")
+                
+                if custom_amount:
+                    # Use saved custom amount directly (in XLM)
+                    logger.info(f"Using saved custom amount: {custom_amount} XLM")
+                    await handle_quick_buy_xlm(callback, asset_code, asset_issuer, custom_amount, app_context)
+                else:
+                    # Prompt for custom amount input (in XLM)
+                    logger.info("No saved custom amount, prompting for input")
+                    await callback.message.reply(
+                        f"Enter the amount of XLM to spend:\n\n"
+                        f"**Example:** `50` (for 50 XLM)\n\n"
+                        f"💡 **Tip:** This XLM amount will be saved for future use with any asset!",
+                        parse_mode="Markdown"
+                    )
+                    await state.set_state(BuySellStates.waiting_for_custom_amount)
+            else:
+                logger.error("Asset information not found in state")
+                await callback.message.reply("❌ Asset information not found. Please try again.")
+        
+        elif data == "clear_ca":
+            # Clear custom amount
+            try:
+                logger.info(f"Clearing custom amount for user {callback.from_user.id}")
+                await clear_custom_amount(callback.from_user.id, app_context.db_pool)
+                logger.info(f"Custom amount cleared successfully for user {callback.from_user.id}")
+                
+                # Send confirmation message
+                await callback.message.reply("🗑️ Custom XLM amount cleared! The button will show 'Custom Amount' next time.")
+                
+                # Refresh the menu to show updated button
+                state_data = await state.get_data()
+                asset_code = state_data.get('asset_code')
+                asset_issuer = state_data.get('asset_issuer')
+                
+                logger.info(f"Refreshing menu for asset: {asset_code}:{asset_issuer}")
+                
+                if asset_code and asset_issuer:
+                    await refresh_buy_menu(callback, asset_code, asset_issuer, app_context)
+                else:
+                    logger.error("Asset information not found in state after clearing custom amount")
+                    await callback.message.reply("❌ Error: Asset information not found. Please try the buy process again.")
+            except Exception as e:
+                logger.error(f"Error in clear_ca handler: {str(e)}", exc_info=True)
+                await callback.message.reply(f"❌ Error clearing custom amount: {str(e)}")
+                # Try to return to main menu as fallback
+                try:
+                    await state.clear()
+                    dynamic_welcome = await get_welcome_text(callback.from_user.id, app_context)
+                    await callback.message.edit_text(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+                except Exception as fallback_error:
+                    logger.error(f"Fallback error: {fallback_error}")
+                    await callback.message.reply("❌ Error occurred. Please use /start to return to main menu.")
+        
+        elif data == "rf":
+            # Refresh buy menu
+            # Get asset info from state
+            state_data = await state.get_data()
+            asset_code = state_data.get('asset_code')
+            asset_issuer = state_data.get('asset_issuer')
+            
+            if asset_code and asset_issuer:
+                await refresh_buy_menu(callback, asset_code, asset_issuer, app_context)
+            else:
+                await callback.message.reply("❌ Asset information not found. Please try again.")
+            
+        elif data == "back_to_main":
+            # Return to main menu
+            await state.clear()
+            dynamic_welcome = await get_welcome_text(callback.from_user.id, app_context)
+            await callback.message.edit_text(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Error in handle_buy_menu_callback: {str(e)}", exc_info=True)
+        try:
+            await callback.message.reply(f"❌ Error processing menu action: {str(e)}")
+        except Exception as reply_error:
+            logger.error(f"Could not send error message: {reply_error}")
+    finally:
+        # Always answer the callback to prevent hanging
+        try:
+            await callback.answer()
+        except Exception as answer_error:
+            logger.error(f"Could not answer callback: {answer_error}")
+
+async def handle_quick_buy_xlm(callback: types.CallbackQuery, asset_code: str, asset_issuer: str, xlm_amount: float, app_context):
+    """Handle quick buy with XLM amounts using PriceService for accurate calculations"""
+    try:
+        # Show processing message
+        processing_msg = await callback.message.reply("🔄 Processing your buy order...")
+        
+        # Calculate token amount using PriceService
+        estimated_tokens = await app_context.price_service.calculate_tokens_for_xlm(
+            asset_code, asset_issuer, xlm_amount
+        )
+        
+        logger.info(f"Quick buy: {xlm_amount} XLM ≈ {estimated_tokens:.7f} {asset_code}")
+        
+        # Use existing perform_buy function
+        response, actual_xlm_spent, actual_amount_received, actual_fee_paid, fee_percentage = await perform_buy(
+            callback.from_user.id, app_context.db_pool, asset_code, asset_issuer, estimated_tokens, app_context
+        )
+        
+        # Delete processing message
+        await processing_msg.delete()
+        
+        # Success message
+        await callback.message.reply(
+            f"✅ **Buy Successful!**\n\n"
+            f"• Bought: {actual_amount_received:.7f} {asset_code}\n"
+            f"• Spent: {actual_xlm_spent:.7f} XLM\n"
+            f"• Fee: {actual_fee_paid:.7f} XLM ({fee_percentage:.2f}%)\n"
+            f"• Tx Hash: `{response['hash']}`",
+            parse_mode="Markdown"
+        )
+        
+        # Delete the buy menu to clean up
+        try:
+            await callback.message.delete()
+        except Exception as e:
+            logger.warning(f"Could not delete buy menu: {e}")
+        
+        # Return to main menu
+        dynamic_welcome = await get_welcome_text(callback.from_user.id, app_context)
+        await callback.message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Quick buy error: {str(e)}", exc_info=True)
+        await callback.message.reply(f"❌ Buy failed: {str(e)}")
+        
+        # Return to main menu on error
+        dynamic_welcome = await get_welcome_text(callback.from_user.id, app_context)
+        await callback.message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+
+async def refresh_buy_menu(callback: types.CallbackQuery, asset_code: str, asset_issuer: str, app_context):
+    """Refresh the buy menu with updated data"""
+    try:
+        logger.info(f"Refreshing buy menu for user {callback.from_user.id}, asset: {asset_code}:{asset_issuer}")
+        
+        # Fetch fresh asset info
+        asset_info = await app_context.price_service.get_asset_info(asset_code, asset_issuer)
+        logger.info(f"Asset info fetched successfully")
+        
+        # Get updated user balance
+        public_key = await app_context.load_public_key(callback.from_user.id)
+        account = await load_account_async(public_key, app_context)
+        available_xlm = calculate_available_xlm(account)
+        logger.info(f"Available XLM: {available_xlm}")
+        
+        # Create updated menu
+        menu_text = create_buy_menu_text(asset_info, asset_code, asset_issuer, available_xlm)
+        keyboard = await create_buy_menu_keyboard(asset_code, asset_issuer, available_xlm, callback.from_user.id, app_context)
+        logger.info(f"Menu text and keyboard created successfully")
+        
+        # Update the message
+        await callback.message.edit_text(menu_text, reply_markup=keyboard, parse_mode="Markdown")
+        logger.info(f"Menu refreshed successfully")
+        
+    except Exception as e:
+        logger.error(f"Error refreshing buy menu: {str(e)}", exc_info=True)
+        try:
+            await callback.message.reply(f"❌ Failed to refresh menu: {str(e)}")
+        except Exception as reply_error:
+            logger.error(f"Could not send error message: {reply_error}")
+            # Try to return to main menu as fallback
+            try:
+                await callback.message.edit_text("❌ Error refreshing menu. Use /start to return to main menu.")
+            except Exception as edit_error:
+                logger.error(f"Could not edit message: {edit_error}")
+
+async def process_custom_amount(message: types.Message, state: FSMContext, app_context):
+    """Process custom amount input for buying (XLM amount)"""
+    try:
+        data = await state.get_data()
+        asset_code = data['asset_code']
+        asset_issuer = data['asset_issuer']
+        xlm_amount = float(message.text)
+        
+        if xlm_amount <= 0:
+            raise ValueError("Amount must be positive")
+        
+        # Show processing message
+        processing_msg = await message.reply("🔄 Processing your buy order...")
+        
+        # Calculate token amount using PriceService
+        estimated_tokens = await app_context.price_service.calculate_tokens_for_xlm(
+            asset_code, asset_issuer, xlm_amount
+        )
+        
+        logger.info(f"Custom amount buy: {xlm_amount} XLM ≈ {estimated_tokens:.7f} {asset_code}")
+        
+        # Use existing perform_buy function with calculated token amount
+        response, actual_xlm_spent, actual_amount_received, actual_fee_paid, fee_percentage = await perform_buy(
+            message.from_user.id, app_context.db_pool, asset_code, asset_issuer, estimated_tokens, app_context
+        )
+        
+        # Delete processing message
+        await processing_msg.delete()
+        
+        # Save the custom XLM amount for future use
+        await save_custom_amount(message.from_user.id, xlm_amount, app_context.db_pool)
+        
+        # Success message
+        await message.reply(
+            f"✅ **Buy Successful!**\n\n"
+            f"• Bought: {actual_amount_received:.7f} {asset_code}\n"
+            f"• Spent: {actual_xlm_spent:.7f} XLM\n"
+            f"• Fee: {actual_fee_paid:.7f} XLM ({fee_percentage:.2f}%)\n"
+            f"• Tx Hash: `{response['hash']}`\n\n"
+            f"💾 **Saved:** {xlm_amount} XLM as your custom amount for future use!",
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Custom amount buy error: {str(e)}", exc_info=True)
+        await message.reply(f"❌ Buy failed: {str(e)}")
+    finally:
+        await state.clear()
+        dynamic_welcome = await get_welcome_text(message.from_user.id, app_context)
+        await message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+
+async def show_sell_asset_selection(message: types.Message, app_context, state: FSMContext, user_id: int = None):
+    """Show asset selection menu for selling"""
+    try:
+        # Get user ID - use provided user_id or fall back to message.from_user.id
+        if user_id is None:
+            user_id = message.from_user.id
+        logger.info(f"show_sell_asset_selection called for user_id: {user_id}")
+        
+        # Get user's public key and account
+        public_key = await app_context.load_public_key(user_id)
+        account = await load_account_async(public_key, app_context)
+        
+        # Get user's assets (excluding XLM)
+        balance_lines = [
+            {"code": b['asset_code'], "issuer": b['asset_issuer'], "balance": b['balance']}
+            for b in account["balances"]
+            if b['asset_type'] in ('credit_alphanum4', 'credit_alphanum12') and float(b['balance']) > 0
+        ]
+        
+        if not balance_lines:
+            await message.reply(
+                "❌ **No Assets to Sell**\n\n"
+                "You don't have any assets to sell.\n"
+                "Use the Buy function to acquire assets first!",
+                parse_mode="Markdown"
+            )
+            await state.clear()
+            return
+        
+        # Fetch asset values and create selection text
+        selection_text = "**Select an asset to sell:**\n\n"
+        asset_buttons = []
+        
+        for asset in balance_lines:
+            # Get asset value
+            value_in_xlm, value_in_usd = await app_context.price_service.get_asset_value(
+                asset['code'], asset['issuer'], asset['balance']
+            )
+            
+            # Format balance display
+            balance_display = f"{float(asset['balance']):,.0f}" if float(asset['balance']) >= 1000 else f"{float(asset['balance']):.7f}"
+            value_display = f"≈ {value_in_xlm:.4f} XLM"
+            if value_in_usd > 0:
+                value_display += f" (${value_in_usd:.2f})"
+            
+            selection_text += f"**{asset['code']}** — {balance_display} {value_display}\n"
+            
+            # Create button for this asset - use shorter callback data
+            asset_buttons.append([
+                InlineKeyboardButton(
+                    text=f"{asset['code']} ({balance_display})",
+                    callback_data=f"sa:{asset['code']}"
+                )
+            ])
+        
+        # Store asset info in state for later use
+        asset_info_dict = {asset['code']: asset['issuer'] for asset in balance_lines}
+        await state.update_data(asset_selection=asset_info_dict)
+        
+        # Add navigation buttons
+        asset_buttons.append([
+            InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")
+        ])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=asset_buttons)
+        
+        await message.reply(selection_text, reply_markup=keyboard, parse_mode="Markdown")
+        await state.set_state(BuySellStates.sell_asset_selection)
+        
+    except Exception as e:
+        logger.error(f"Error showing sell asset selection: {str(e)}", exc_info=True)
+        await message.reply(f"❌ Error loading assets: {str(e)}")
+        await state.clear()
+
+async def show_sell_menu(message: types.Message, asset_code: str, asset_issuer: str, app_context, state: FSMContext, user_id: int = None):
+    """Show the enhanced sell menu with asset info and percentage sell options"""
+    
+    # Get user ID - use provided user_id or fall back to message.from_user.id
+    if user_id is None:
+        user_id = message.from_user.id
+    logger.info(f"show_sell_menu called for user_id: {user_id}")
+    
+    # Fetch asset information from Stellar Expert using PriceService
+    asset_info = await app_context.price_service.get_asset_info(asset_code, asset_issuer)
+    
+    # Get user's asset balance
+    public_key = await app_context.load_public_key(user_id)
+    account = await load_account_async(public_key, app_context)
+    
+    # Find the specific asset balance
+    asset_balance = 0
+    for balance in account["balances"]:
+        if (balance.get('asset_code') == asset_code and 
+            balance.get('asset_issuer') == asset_issuer):
+            asset_balance = float(balance['balance'])
+            break
+    
+    if asset_balance <= 0:
+        await message.reply(f"❌ You don't have any {asset_code} to sell.")
+        await state.clear()
+        return
+    
+    # Get asset value
+    value_in_xlm, value_in_usd = await app_context.price_service.get_asset_value(
+        asset_code, asset_issuer, asset_balance
+    )
+    
+    logger.info(f"Creating sell menu for {asset_code}:{asset_issuer}, balance: {asset_balance}")
+    
+    # Create menu text
+    menu_text = create_sell_menu_text(asset_info, asset_code, asset_issuer, asset_balance, value_in_xlm, value_in_usd)
+    
+    # Create keyboard with percentage options
+    keyboard = create_sell_menu_keyboard(asset_code, asset_issuer, asset_balance)
+    
+    # Delete the asset selection menu to clean up the chat
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete asset selection menu: {e}")
+    
+    # Use send_message instead of reply since we deleted the original message
+    await message.bot.send_message(message.chat.id, menu_text, reply_markup=keyboard, parse_mode="Markdown")
+    await state.set_state(BuySellStates.sell_menu_displayed)
+
+def create_sell_menu_text(asset_info, asset_code: str, asset_issuer: str, asset_balance: float, value_in_xlm: float, value_in_usd: float) -> str:
+    """Create the text for the sell menu using PriceService data"""
+    
+    text = f"**Sell {asset_code}** — ({asset_info.get('name', asset_code) if asset_info else asset_code})\n"
+    text += f"`{asset_issuer}`\n\n"
+    
+    # Asset balance and value
+    balance_display = f"{asset_balance:,.0f}" if asset_balance >= 1000 else f"{asset_balance:.7f}"
+    text += f"**💰 Your Balance:** {balance_display} {asset_code}\n"
+    text += f"**💎 Value:** ≈ {value_in_xlm:.4f} XLM"
+    if value_in_usd > 0:
+        text += f" (${value_in_usd:.2f})"
+    text += "\n\n"
+    
+    if asset_info:
+        # Market data section using PriceService data
+        text += "**📊 Market Data:**\n"
+        if asset_info.get('price_usd'):
+            text += f"• Price: ${asset_info['price_usd']:.8f}\n"
+        if asset_info.get('price_xlm'):
+            text += f"• Price: {asset_info['price_xlm']:.8f} XLM\n"
+        if asset_info.get('market_cap_usd'):
+            text += f"• Market Cap: ${asset_info['market_cap_usd']:,.0f}\n"
+        if asset_info.get('volume_24h'):
+            text += f"• 24h Volume: ${asset_info['volume_24h']:,.0f}\n"
+        if asset_info.get('supply'):
+            text += f"• Supply: {asset_info['supply']:,.0f}\n"
+        
+        if asset_info.get('domain'):
+            text += f"• Domain: {asset_info['domain']}\n"
+        if asset_info.get('tags'):
+            text += f"• Tags: {', '.join(asset_info['tags'])}\n"
+    
+    text += "\n**Select percentage to sell:**"
+    
+    return text
+
+def create_sell_menu_keyboard(asset_code: str, asset_issuer: str, asset_balance: float) -> InlineKeyboardMarkup:
+    """Create the keyboard for the sell menu with percentage options"""
+    
+    # Percentage options (10%, 25%, 50%, 100%)
+    percentages = [10, 25, 50, 100]
+    
+    logger.info(f"Creating sell keyboard with percentages: {percentages}, balance: {asset_balance}")
+    
+    # Create keyboard rows
+    keyboard_rows = []
+    
+    # Percentage buttons (2 per row for better visibility)
+    for i in range(0, len(percentages), 2):
+        row = []
+        for j in range(2):
+            if i + j < len(percentages):
+                percentage = percentages[i + j]
+                button_text = f"{percentage}%"
+                
+                # Use shorter callback data to avoid BUTTON_DATA_INVALID error
+                row.append(InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f"sell_pct:{percentage}"
+                ))
+                logger.info(f"Creating sell button: {button_text}")
+        keyboard_rows.append(row)
+    
+    # Custom percentage button
+    keyboard_rows.append([
+        InlineKeyboardButton(text="💰 Custom %", callback_data="sell_custom_pct")
+    ])
+    
+    # Navigation buttons
+    keyboard_rows.extend([
+        [InlineKeyboardButton(text="🔄 Refresh", callback_data="sell_refresh")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="sell_back_to_assets")]
+    ])
+    
+    logger.info(f"Created sell keyboard with {len(keyboard_rows)} rows")
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+async def handle_sell_menu_callback(callback: types.CallbackQuery, state: FSMContext, app_context):
+    """Handle callbacks from the sell menu"""
+    data = callback.data
+    
+    if data.startswith("sell_pct:"):
+        # Handle percentage-based sell
+        _, percentage = data.split(":")
+        # Get asset info from state
+        state_data = await state.get_data()
+        asset_code = state_data.get('asset_code')
+        asset_issuer = state_data.get('asset_issuer')
+        
+        if asset_code and asset_issuer:
+            await handle_percentage_sell(callback, asset_code, asset_issuer, int(percentage), app_context)
+        else:
+            await callback.message.reply("❌ Asset information not found. Please try again.")
+    
+    elif data == "sell_custom_pct":
+        # Handle custom percentage input
+        logger.info(f"Custom percentage button clicked for user {callback.from_user.id}")
+        
+        # Get asset info from state
+        state_data = await state.get_data()
+        asset_code = state_data.get('asset_code')
+        asset_issuer = state_data.get('asset_issuer')
+        
+        logger.info(f"Asset info from state: {asset_code}:{asset_issuer}")
+        
+        if asset_code and asset_issuer:
+            await callback.message.reply(
+                f"Enter the percentage of {asset_code} to sell:\n\n"
+                f"**Example:** `25` (for 25%)\n\n"
+                f"💡 **Tip:** Enter a number between 1 and 100!",
+                parse_mode="Markdown"
+            )
+            await state.set_state(BuySellStates.waiting_for_sell_percentage)
+        else:
+            logger.error("Asset information not found in state")
+            await callback.message.reply("❌ Asset information not found. Please try again.")
+    
+    elif data == "sell_refresh":
+        # Refresh sell menu
+        # Get asset info from state
+        state_data = await state.get_data()
+        asset_code = state_data.get('asset_code')
+        asset_issuer = state_data.get('asset_issuer')
+        
+        if asset_code and asset_issuer:
+            await refresh_sell_menu(callback, asset_code, asset_issuer, app_context, callback.from_user.id)
+        else:
+            await callback.message.reply("❌ Asset information not found. Please try again.")
+    
+    elif data == "sell_back_to_assets":
+        # Return to asset selection
+        await show_sell_asset_selection(callback.message, app_context, state)
+    
+    await callback.answer()
+
+async def handle_percentage_sell(callback: types.CallbackQuery, asset_code: str, asset_issuer: str, percentage: int, app_context):
+    """Handle percentage-based sell operations"""
+    try:
+        # Get user's current asset balance
+        user_id = callback.from_user.id
+        logger.info(f"handle_percentage_sell called for user_id: {user_id}")
+        
+        public_key = await app_context.load_public_key(user_id)
+        account = await load_account_async(public_key, app_context)
+        
+        # Find the specific asset balance
+        asset_balance = 0
+        for balance in account["balances"]:
+            if (balance.get('asset_code') == asset_code and 
+                balance.get('asset_issuer') == asset_issuer):
+                asset_balance = float(balance['balance'])
+                break
+        
+        if asset_balance <= 0:
+            await callback.message.reply(f"❌ You don't have any {asset_code} to sell.")
+            return
+        
+        # Calculate amount to sell based on percentage
+        amount_to_sell = asset_balance * (percentage / 100)
+        
+        # Show processing message
+        processing_msg = await callback.message.reply(f"🔄 Processing your {percentage}% sell order...")
+        
+        logger.info(f"Percentage sell: {percentage}% of {asset_balance} {asset_code} = {amount_to_sell:.7f} {asset_code}")
+        
+        # Use existing perform_sell function
+        response, actual_xlm_received, actual_amount_sent, actual_fee_paid, fee_percentage = await perform_sell(
+            user_id, app_context.db_pool, asset_code, asset_issuer, amount_to_sell, app_context
+        )
+        
+        # Delete processing message
+        await processing_msg.delete()
+        
+        # Success message
+        await callback.message.reply(
+            f"✅ **Sell Successful!**\n\n"
+            f"• Sold: {actual_amount_sent:.7f} {asset_code} ({percentage}%)\n"
+            f"• Received: {actual_xlm_received:.7f} XLM\n"
+            f"• Fee: {actual_fee_paid:.7f} XLM ({fee_percentage:.2f}%)\n"
+            f"• Tx Hash: `{response['hash']}`",
+            parse_mode="Markdown"
+        )
+        
+        # Delete the sell menu to clean up
+        try:
+            await callback.message.delete()
+        except Exception as e:
+            # Suppress cleanup errors - they don't affect functionality
+            logger.debug(f"Could not delete sell menu (non-critical): {e}")
+        
+        # Return to main menu
+        try:
+            dynamic_welcome = await get_welcome_text(user_id, app_context)
+            await callback.message.bot.send_message(callback.message.chat.id, dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Error returning to main menu: {e}")
+            # Fallback: just send a simple message
+            await callback.message.bot.send_message(callback.message.chat.id, "✅ Sell completed! Use /start to return to main menu.")
+        
+    except Exception as e:
+        logger.error(f"Percentage sell error: {str(e)}", exc_info=True)
+        try:
+            await callback.message.bot.send_message(callback.message.chat.id, f"❌ Sell failed: {str(e)}")
+        except Exception as send_error:
+            logger.error(f"Could not send error message: {send_error}")
+        
+        # Return to main menu on error
+        try:
+            dynamic_welcome = await get_welcome_text(callback.from_user.id, app_context)
+            await callback.message.bot.send_message(callback.message.chat.id, dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        except Exception as menu_error:
+            logger.error(f"Error returning to main menu: {menu_error}")
+            await callback.message.bot.send_message(callback.message.chat.id, "✅ Use /start to return to main menu.")
+
+async def refresh_sell_menu(callback: types.CallbackQuery, asset_code: str, asset_issuer: str, app_context, user_id: int = None):
+    """Refresh the sell menu with updated data"""
+    try:
+        # Get user ID - use provided user_id or fall back to callback.from_user.id
+        if user_id is None:
+            user_id = callback.from_user.id
+        logger.info(f"refresh_sell_menu called for user_id: {user_id}")
+        
+        # Fetch fresh asset info
+        asset_info = await app_context.price_service.get_asset_info(asset_code, asset_issuer)
+        
+        # Get updated user balance
+        public_key = await app_context.load_public_key(user_id)
+        account = await load_account_async(public_key, app_context)
+        
+        # Find the specific asset balance
+        asset_balance = 0
+        for balance in account["balances"]:
+            if (balance.get('asset_code') == asset_code and 
+                balance.get('asset_issuer') == asset_issuer):
+                asset_balance = float(balance['balance'])
+                break
+        
+        if asset_balance <= 0:
+            await callback.message.edit_text("❌ You no longer have any of this asset to sell.")
+            return
+        
+        # Get updated asset value
+        value_in_xlm, value_in_usd = await app_context.price_service.get_asset_value(
+            asset_code, asset_issuer, asset_balance
+        )
+        
+        # Create updated menu
+        menu_text = create_sell_menu_text(asset_info, asset_code, asset_issuer, asset_balance, value_in_xlm, value_in_usd)
+        keyboard = create_sell_menu_keyboard(asset_code, asset_issuer, asset_balance)
+        
+        # Update the message
+        await callback.message.edit_text(menu_text, reply_markup=keyboard, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Error refreshing sell menu: {str(e)}")
+        await callback.message.reply(f"❌ Failed to refresh menu: {str(e)}")
+
+async def process_custom_sell_percentage(message: types.Message, state: FSMContext, app_context):
+    """Process custom percentage input for selling"""
+    try:
+        data = await state.get_data()
+        asset_code = data['asset_code']
+        asset_issuer = data['asset_issuer']
+        percentage = float(message.text)
+        
+        if percentage <= 0 or percentage > 100:
+            raise ValueError("Percentage must be between 1 and 100")
+        
+        # Get user's current asset balance
+        public_key = await app_context.load_public_key(message.from_user.id)
+        account = await load_account_async(public_key, app_context)
+        
+        # Find the specific asset balance
+        asset_balance = 0
+        for balance in account["balances"]:
+            if (balance.get('asset_code') == asset_code and 
+                balance.get('asset_issuer') == asset_issuer):
+                asset_balance = float(balance['balance'])
+                break
+        
+        if asset_balance <= 0:
+            await message.reply(f"❌ You don't have any {asset_code} to sell.")
+            await state.clear()
+            return
+        
+        # Calculate amount to sell based on percentage
+        amount_to_sell = asset_balance * (percentage / 100)
+        
+        # Show processing message
+        processing_msg = await message.reply(f"🔄 Processing your {percentage}% sell order...")
+        
+        logger.info(f"Custom percentage sell: {percentage}% of {asset_balance} {asset_code} = {amount_to_sell:.7f} {asset_code}")
+        
+        # Use existing perform_sell function
+        response, actual_xlm_received, actual_amount_sent, actual_fee_paid, fee_percentage = await perform_sell(
+            message.from_user.id, app_context.db_pool, asset_code, asset_issuer, amount_to_sell, app_context
+        )
+        
+        # Delete processing message
+        await processing_msg.delete()
+        
+        # Success message
+        await message.reply(
+            f"✅ **Sell Successful!**\n\n"
+            f"• Sold: {actual_amount_sent:.7f} {asset_code} ({percentage}%)\n"
+            f"• Received: {actual_xlm_received:.7f} XLM\n"
+            f"• Fee: {actual_fee_paid:.7f} XLM ({fee_percentage:.2f}%)\n"
+            f"• Tx Hash: `{response['hash']}`",
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Custom percentage sell error: {str(e)}", exc_info=True)
+        try:
+            await message.bot.send_message(message.chat.id, f"❌ Sell failed: {str(e)}")
+        except Exception as send_error:
+            logger.error(f"Could not send error message: {send_error}")
+        
+        # Return to main menu on error
+        try:
+            dynamic_welcome = await get_welcome_text(message.from_user.id, app_context)
+            await message.bot.send_message(message.chat.id, dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        except Exception as menu_error:
+            logger.error(f"Error returning to main menu: {menu_error}")
+            await message.bot.send_message(message.chat.id, "✅ Use /start to return to main menu.")
+    finally:
+        await state.clear()
+        dynamic_welcome = await get_welcome_text(message.from_user.id, app_context)
+        await message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+
+async def handle_sell_asset_selection(callback: types.CallbackQuery, state: FSMContext, app_context):
+    """Handle asset selection for selling"""
+    try:
+        # Parse asset code from callback data
+        _, asset_code = callback.data.split(":")
+        
+        logger.info(f"Asset selected for selling: {asset_code}")
+        
+        # Get asset info from state
+        state_data = await state.get_data()
+        asset_selection = state_data.get('asset_selection', {})
+        
+        if asset_code not in asset_selection:
+            await callback.message.reply("❌ Asset information not found. Please try again.")
+            return
+        
+        asset_issuer = asset_selection[asset_code]
+        logger.info(f"Found asset issuer: {asset_issuer}")
+        
+        # Store asset info in state
+        await state.update_data(asset_code=asset_code, asset_issuer=asset_issuer)
+        
+        # Show sell menu for selected asset
+        await show_sell_menu(callback.message, asset_code, asset_issuer, app_context, state, callback.from_user.id)
+        
+    except Exception as e:
+        logger.error(f"Error handling sell asset selection: {str(e)}", exc_info=True)
+        await callback.message.reply(f"❌ Error selecting asset: {str(e)}")
+        await state.clear()
+
+async def buy_command(message: types.Message, state: FSMContext, app_context):
+    """Handle /buy command - trigger enhanced buy flow"""
+    logger.info(f"Buy command triggered by user {message.from_user.id}")
+    
+    # Set action to buy and trigger asset input
+    await state.update_data(action='buy')
+    await message.reply(
+        "Please enter the asset code and issuer for buying in the format: `code:issuer`\n\n"
+        "**Example:** `USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN`",
+        parse_mode="Markdown"
+    )
+    await state.set_state(BuySellStates.waiting_for_asset)
+
+async def sell_command(message: types.Message, state: FSMContext, app_context):
+    """Handle /sell command - trigger enhanced sell flow"""
+    logger.info(f"Sell command triggered by user {message.from_user.id}")
+    
+    # Set action to sell and show asset selection
+    await state.update_data(action='sell')
+    await show_sell_asset_selection(message, app_context, state, message.from_user.id)
+
+async def help_command(message: types.Message):
+    """Handle /help command - show enhanced trading features"""
+    help_text = """
+🤖 **PhotonBot Enhanced Trading Commands**
+
+## 🚀 **Quick Trading Commands:**
+• **`/buy`** - Enhanced buy with XLM amounts & market data
+• **`/sell`** - Enhanced sell with asset selection & percentages
+• **`/balance`** - Check wallet balance & asset values
+
+## 💰 **Enhanced Buy Features:**
+• **Market Data**: Real-time prices, market cap, volume
+• **Quick Buy**: 25, 50, 100, 200 XLM buttons
+• **Custom Amount**: Save your preferred XLM amount
+• **Price Calculations**: Real-time token estimates
+
+## 📈 **Enhanced Sell Features:**
+• **Asset Selection**: See all your assets with values
+• **Percentage Selling**: 10%, 25%, 50%, 100% options
+• **Custom Percentage**: Enter any percentage (1-100%)
+• **Market Info**: Asset details and market data
+
+## 🎯 **How to Use:**
+
+### **Buy Assets:**
+1. Type `/buy` or click Buy button
+2. Enter asset: `USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN`
+3. Choose XLM amount or custom amount
+4. Confirm trade
+
+### **Sell Assets:**
+1. Type `/sell` or click Sell button
+2. Select asset from your portfolio
+3. Choose percentage or custom amount
+4. Confirm trade
+
+## 🔧 **Other Commands:**
+• **`/register`** - Create new Turnkey wallet
+• **`/login`** - Access existing wallet
+• **`/start`** - Show main menu
+
+## 💡 **Tips:**
+• Custom amounts are saved for future use
+• Market data updates in real-time
+• All trades use advanced pathfinding
+• Clean, professional interface
+
+**Happy Trading! 🚀**
+"""
+    
+    await message.reply(help_text, parse_mode="Markdown")

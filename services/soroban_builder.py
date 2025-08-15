@@ -87,8 +87,11 @@ async def build_and_submit_soroban_transaction(telegram_id, soroban_ops, app_con
     slippage = float(user_data['slippage'])
     logger.info(f"User {telegram_id} settings - Multiplier: {multiplier}, Fixed Amount: {fixed_amount}, Slippage: {slippage}")
 
-    # Use the free mainnet RPC endpoint
-    rpc_url = "https://mainnet.sorobanrpc.com"
+    # Select RPC by network
+    if app_context.network_passphrase == Network.PUBLIC_NETWORK_PASSPHRASE:
+        rpc_url = "https://mainnet.sorobanrpc.com"
+    else:
+        rpc_url = "https://soroban-testnet.stellar.org"
     client = AiohttpClient()
     async with client:
         soroban_server = SorobanServerAsync(rpc_url, client=client)
@@ -280,7 +283,7 @@ async def build_and_submit_soroban_transaction(telegram_id, soroban_ops, app_con
                 # Build and submit transaction
                 tx_builder = TransactionBuilder(
                     source_account=Account(public_key, sequence),
-                    network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE,
+                    network_passphrase=app_context.network_passphrase,
                     base_fee=base_fee
                 ).add_time_bounds(0, int(time.time()) + 900)
 

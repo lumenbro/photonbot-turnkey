@@ -26,6 +26,125 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
 ```
 
+## TEST_MODE DEVELOPMENT PATTERNS
+⚠️ **CRITICAL**: This project uses TEST_MODE for local development. All new features must support both test and production modes.
+
+### TEST_MODE Architecture
+- **Centralized Flag**: Use `app_context.is_test_mode` for all mode checks
+- **Environment-driven**: `TEST_MODE=true` enables local development features
+- **Production Safety**: All TEST_MODE code must be properly gated
+
+### TEST_MODE Implementation Rules
+```python
+# ✅ CORRECT: Use centralized flag
+if app_context.is_test_mode:
+    # Test-only code (local signing, local DB, etc.)
+else:
+    # Production code (Turnkey signing, RDS DB, etc.)
+
+# ❌ WRONG: Scattered environment checks
+if os.getenv('TEST_MODE', 'false').lower() == 'true':
+    # Don't do this - use app_context.is_test_mode instead
+```
+
+### TEST_MODE Environment Variables
+```bash
+# Local Development (.env)
+TEST_MODE=true
+STELLAR_NETWORK=TESTNET  # or PUBLIC
+TEST_SIGNER_SECRET=SB...  # Local keypair for signing
+DB_HOST=localhost
+DB_PORT=5434
+DB_USER=testuser
+DB_PASSWORD=testpass
+DB_NAME=lumenbro_turnkey
+
+# Production (Secrets Manager)
+TEST_MODE=false  # or unset
+STELLAR_NETWORK=PUBLIC  # defaults to PUBLIC
+TURNKEY_API_PUBLIC_KEY=...
+TURNKEY_API_PRIVATE_KEY=...
+TURNKEY_ORGANIZATION_ID=...
+DB_HOST=lumenbro-turnkey.cz2imkksk7b4.us-west-1.rds.amazonaws.com
+DB_SSL=verify
+```
+
+### TEST_MODE Signing Architecture
+```python
+# ✅ CORRECT: Centralized signer selection in main.py
+if app_context.is_test_mode:
+    app_context.sign_transaction = LocalSigner(app_context).sign_transaction
+else:
+    app_context.sign_transaction = TurnkeySigner(app_context).sign_transaction
+
+# ✅ CORRECT: Use app_context.sign_transaction everywhere
+signed_xdr = await app_context.sign_transaction(telegram_id, transaction_xdr)
+```
+
+### TEST_MODE Database Patterns
+```python
+# ✅ CORRECT: TEST_MODE wallet lookup
+async def get_active_wallet(self, telegram_id: int, app_context=None):
+    if app_context.is_test_mode:
+        # Check users.public_key directly
+        row = await conn.fetchrow("SELECT public_key FROM users WHERE telegram_id = $1", telegram_id)
+        return row['public_key'] if row else None
+    else:
+        # Check turnkey_wallets table
+        row = await conn.fetchrow("SELECT public_key FROM turnkey_wallets WHERE telegram_id = $1 AND is_active = TRUE", telegram_id)
+        return row['public_key'] if row else None
+```
+
+### TEST_MODE User Registration
+```python
+# ✅ CORRECT: TEST_MODE bypass for mini-app registration
+if app_context.is_test_mode:
+    # Insert test user directly with TEST_SIGNER_SECRET public key
+    test_keypair = Keypair.from_secret(os.getenv("TEST_SIGNER_SECRET"))
+    await conn.execute("INSERT INTO users (telegram_id, public_key) VALUES ($1, $2)", telegram_id, test_keypair.public_key)
+    await message.reply("Test mode: wallet registered locally.")
+else:
+    # Send mini-app button for Turnkey registration
+    await message.reply("Open Mini App to register:", reply_markup=keyboard)
+```
+
+### TEST_MODE Logging
+```python
+# ✅ CORRECT: Verbose logging in TEST_MODE
+if TEST_MODE:
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger.info("🔍 TEST_MODE: Verbose debugging enabled")
+else:
+    logging.basicConfig(level=logging.INFO)
+```
+
+### TEST_MODE Network Configuration
+```python
+# ✅ CORRECT: Environment-driven network config
+stellar_network = os.getenv("STELLAR_NETWORK", "PUBLIC").upper()
+if stellar_network == "TESTNET":
+    app_context.network_passphrase = Network.TESTNET_NETWORK_PASSPHRASE
+    app_context.horizon_url = os.getenv("HORIZON_URL_TESTNET", "https://horizon-testnet.stellar.org")
+else:  # PUBLIC (default)
+    app_context.network_passphrase = Network.PUBLIC_NETWORK_PASSPHRASE
+    app_context.horizon_url = os.getenv("HORIZON_URL_PUBLIC", "https://horizon.stellar.org")
+```
+
+### TEST_MODE Safety Rules
+1. **Never hardcode test values** in production paths
+2. **Always use app_context.is_test_mode** for mode checks
+3. **Validate environment variables** in production mode
+4. **Test both modes** before deployment
+5. **Use idempotent database changes** (CREATE TABLE IF NOT EXISTS)
+
+### TEST_MODE Testing Checklist
+- [ ] Test with `TEST_MODE=true` (local development)
+- [ ] Test with `TEST_MODE=false` (production simulation)
+- [ ] Verify Turnkey variables are required in production
+- [ ] Confirm local signing works in test mode
+- [ ] Validate production signing path is untouched
+- [ ] Check database connections work in both modes
+
 ## PROJECT ARCHITECTURE
 
 ### Database Schema
@@ -37,6 +156,8 @@ markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
 - **WalletManager**: Centralized wallet operations (`services/wallet_manager.py`)
 - **KMS Service**: AWS KMS decryption for legacy S-address secrets (`services/kms_service.py`)
 - **Price Service**: Cached price data (`services/price_service.py`)
+- **LocalSigner**: Local signing for TEST_MODE (`services/local_signer.py`)
+- **TurnkeySigner**: Production signing with Turnkey (`main.py`)
 
 ### Handler Structure
 - **main_menu.py**: Core bot logic, migration flows, safety checks
@@ -78,10 +199,14 @@ sudo systemctl restart photonbot-test
 ```
 
 ### Environment Variables
-- Database: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
-- AWS: `AWS_REGION`, `KMS_KEY_ID`
-- Telegram: `TELEGRAM_BOT_TOKEN`
-- Stellar: `FEE_WALLET`
+- **TEST_MODE**: `true` for local development, `false` for production
+- **STELLAR_NETWORK**: `TESTNET` or `PUBLIC` (defaults to PUBLIC)
+- **TEST_SIGNER_SECRET**: Local keypair secret for TEST_MODE
+- **Database**: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
+- **AWS**: `AWS_REGION`, `KMS_KEY_ID`
+- **Telegram**: `TELEGRAM_BOT_TOKEN`
+- **Stellar**: `FEE_WALLET`
+- **Turnkey**: `TURNKEY_API_PUBLIC_KEY`, `TURNKEY_API_PRIVATE_KEY`, `TURNKEY_ORGANIZATION_ID`
 
 ## TESTING GUIDELINES
 
@@ -89,11 +214,13 @@ sudo systemctl restart photonbot-test
 - Use Docker PostgreSQL for local testing
 - Mock AWS KMS for unit tests
 - Test both legacy and new user scenarios
+- **Always test both TEST_MODE=true and TEST_MODE=false**
 
 ### Safety Testing
 - Verify migration button doesn't reset wallet data
 - Confirm Turnkey registration safety checks work
 - Test multi-wallet functionality for new users
+- **Validate production mode doesn't use test code**
 
 ## ERROR HANDLING
 
@@ -102,11 +229,13 @@ sudo systemctl restart photonbot-test
 - **Database permissions**: Grant `botadmin` proper privileges for schema updates
 - **KMS decryption**: Handle both old and new encryption formats
 - **Git conflicts**: Use `git stash` when pulling with local changes
+- **TEST_MODE issues**: Check `app_context.is_test_mode` usage
 
 ### Debugging
 - Check `journalctl -u photonbot-test.service -f` for logs
 - Use `logger.info()` for debugging KMS decryption
 - Verify database schema with `\d users` in psql
+- **TEST_MODE**: Check `test_mode_debug.log` for verbose debugging
 
 ## SECURITY CONSIDERATIONS
 
@@ -115,12 +244,14 @@ sudo systemctl restart photonbot-test
 - Use KMS for encrypting sensitive data
 - Delete sensitive messages after export
 - Add `services/price_cache.json` to `.gitignore`
+- **TEST_MODE**: Never commit `TEST_SIGNER_SECRET` to production
 
 ### User Data Protection
 - Legacy users get export-only access
 - New users get multi-wallet support
 - Safety checks prevent accidental data loss
 - Clear separation between legacy and new user flows
+- **TEST_MODE**: Clear separation between test and production data
 
 ## FUTURE-PROOFING
 
@@ -135,3 +266,188 @@ sudo systemctl restart photonbot-test
 - `login.js` handles Turnkey session management
 - Python-side safety checks complement Node.js checks
 - No conflicts between Python and Node.js safety mechanisms
+
+### TEST_MODE Evolution
+- **Centralized flag management** prevents scattered logic
+- **Environment-driven configuration** enables flexible testing
+- **Production safety gates** ensure test code never runs in production
+- **Verbose debugging** helps troubleshoot issues quickly
+
+## ASYNC DEVELOPMENT PATTERNS
+
+### **CRITICAL: Always Use Async Functions**
+⚠️ **MANDATORY**: This bot handles concurrent users and must remain non-blocking.
+
+### **Stellar SDK Async Usage**
+```python
+# ✅ CORRECT: Use async Stellar SDK functions
+from stellar_sdk.call_builder.call_builder_async import TransactionsCallBuilder as AsyncTransactionsCallBuilder
+from stellar_sdk.call_builder.call_builder_async import LedgersCallBuilder as AsyncLedgersCallBuilder
+from stellar_sdk.call_builder.call_builder_async import OrderbookCallBuilder as AsyncOrderbookCallBuilder
+
+# Async call builders
+builder = AsyncTransactionsCallBuilder(horizon_url=app_context.horizon_url, client=app_context.client)
+response = await builder.call()
+
+# ❌ WRONG: Don't use sync versions
+from stellar_sdk.call_builder import TransactionsCallBuilder  # Sync version
+builder = TransactionsCallBuilder(horizon_url=app_context.horizon_url)  # Blocks event loop
+response = builder.call()  # Synchronous call
+```
+
+### **Database Operations**
+```python
+# ✅ CORRECT: Always use async database operations
+async with db_pool.acquire() as conn:
+    row = await conn.fetchrow("SELECT * FROM users WHERE telegram_id = $1", telegram_id)
+    await conn.execute("INSERT INTO users (telegram_id, public_key) VALUES ($1, $2)", telegram_id, public_key)
+
+# ❌ WRONG: Never use sync database operations
+# This would block the entire event loop for all users
+```
+
+### **HTTP Requests**
+```python
+# ✅ CORRECT: Use aiohttp for HTTP requests
+import aiohttp
+async with aiohttp.ClientSession() as session:
+    async with session.get(url) as resp:
+        data = await resp.json()
+
+# ❌ WRONG: Don't use requests or urllib
+import requests  # Sync library
+response = requests.get(url)  # Blocks event loop
+```
+
+### **File Operations**
+```python
+# ✅ CORRECT: Use async file operations when possible
+import aiofiles
+async with aiofiles.open('file.txt', 'r') as f:
+    content = await f.read()
+
+# ✅ ACCEPTABLE: Use sync file ops for small config files only
+# Only for startup/config files, never in request handlers
+import json
+with open('config.json', 'r') as f:
+    config = json.load(f)
+```
+
+### **Async Wrapper Pattern**
+```python
+# ✅ CORRECT: Wrap sync operations in async when necessary
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+async def async_wrapper(sync_function, *args, **kwargs):
+    """Wrap sync functions that can't be made async."""
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as executor:
+        return await loop.run_in_executor(executor, sync_function, *args, **kwargs)
+
+# Usage example
+result = await async_wrapper(some_sync_function, arg1, arg2)
+```
+
+### **Common Async Patterns**
+```python
+# ✅ CORRECT: Proper async function definition
+async def handle_user_request(telegram_id, message):
+    # All operations are async
+    user_data = await get_user_data(telegram_id)
+    response = await process_request(message)
+    await send_response(telegram_id, response)
+
+# ✅ CORRECT: Async context managers
+async with db_pool.acquire() as conn:
+    async with aiohttp.ClientSession() as session:
+        # Nested async operations
+
+# ✅ CORRECT: Async list comprehensions
+tasks = [process_item(item) for item in items]
+results = await asyncio.gather(*tasks)
+```
+
+### **Performance Considerations**
+```python
+# ✅ CORRECT: Batch operations when possible
+# Instead of multiple individual queries
+for user_id in user_ids:
+    await conn.execute("UPDATE users SET status = $1 WHERE id = $2", status, user_id)
+
+# Use batch operations
+await conn.executemany("UPDATE users SET status = $1 WHERE id = $2", 
+                      [(status, user_id) for user_id in user_ids])
+
+# ✅ CORRECT: Use connection pooling
+# Already implemented with asyncpg pool
+```
+
+### **Error Handling in Async Code**
+```python
+# ✅ CORRECT: Proper async error handling
+async def safe_operation():
+    try:
+        result = await risky_async_operation()
+        return result
+    except asyncio.TimeoutError:
+        logger.error("Operation timed out")
+        raise
+    except Exception as e:
+        logger.error(f"Operation failed: {e}")
+        raise
+
+# ✅ CORRECT: Timeout handling
+try:
+    result = await asyncio.wait_for(slow_operation(), timeout=30.0)
+except asyncio.TimeoutError:
+    logger.error("Operation timed out after 30 seconds")
+```
+
+### **Testing Async Code**
+```python
+# ✅ CORRECT: Test async functions properly
+import pytest
+
+@pytest.mark.asyncio
+async def test_async_function():
+    result = await my_async_function()
+    assert result == expected_value
+
+# ✅ CORRECT: Mock async functions
+async def mock_async_function():
+    return "mocked_result"
+
+# In test
+with patch('module.real_async_function', mock_async_function):
+    result = await function_under_test()
+```
+
+### **Common Pitfalls to Avoid**
+```python
+# ❌ WRONG: Blocking operations in async functions
+async def bad_function():
+    time.sleep(5)  # Blocks entire event loop!
+    requests.get(url)  # Blocks entire event loop!
+    subprocess.run(['command'])  # Blocks entire event loop!
+
+# ✅ CORRECT: Non-blocking alternatives
+async def good_function():
+    await asyncio.sleep(5)  # Non-blocking
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            data = await resp.json()
+    # Use asyncio.create_subprocess_exec for subprocess
+```
+
+### **Async Safety Checklist**
+- [ ] All database operations use `await`
+- [ ] All HTTP requests use `aiohttp` or `httpx`
+- [ ] All Stellar SDK calls use async versions
+- [ ] No `time.sleep()` - use `await asyncio.sleep()`
+- [ ] No sync file operations in request handlers
+- [ ] No blocking subprocess calls
+- [ ] All external API calls are async
+- [ ] Proper error handling with async exceptions
+- [ ] Timeout handling for long operations
+- [ ] Connection pooling for database/HTTP

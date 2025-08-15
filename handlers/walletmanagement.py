@@ -55,8 +55,17 @@ async def get_wallet_management_menu(telegram_id, app_context):
             FROM users WHERE telegram_id = $1 AND source_old_db IS NOT NULL
         """, telegram_id)
         
+        # In TEST_MODE, bypass Turnkey registration requirement if a user row exists
         if not turnkey_row and not legacy_user:
-            return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="No Wallet - Register First", callback_data="ignore")]]), "No Wallet - Register First"
+            is_test_mode = app_context.is_test_mode if app_context else os.getenv('TEST_MODE', 'false').lower() == 'true'
+            if is_test_mode:
+                has_user = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM users WHERE telegram_id = $1)", telegram_id)
+                if has_user:
+                    logger.info(f"TEST_MODE bypass: allowing wallet management without Turnkey wallet for {telegram_id}")
+                else:
+                    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="No Wallet - Register First", callback_data="ignore")]]), "No Wallet - Register First"
+            else:
+                return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="No Wallet - Register First", callback_data="ignore")]]), "No Wallet - Register First"
         
         # Check session status
         session_active = await conn.fetchval(

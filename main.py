@@ -35,19 +35,37 @@ from cryptography.hazmat.backends import default_backend
 from base64 import urlsafe_b64encode
 from dotenv import load_dotenv
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Load environment variables
+# Load environment variables first
 load_dotenv()
+TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true'
+
+# Configure logging based on TEST_MODE
+if TEST_MODE:
+    # Verbose logging for TEST_MODE
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler('test_mode_debug.log')
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    logger.info("🔍 TEST_MODE: Verbose debugging enabled")
+else:
+    # Normal logging for production
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+# Load other environment variables
 TURNKEY_API_PUBLIC_KEY = os.getenv('TURNKEY_API_PUBLIC_KEY')
 TURNKEY_API_PRIVATE_KEY = os.getenv('TURNKEY_API_PRIVATE_KEY')
 TURNKEY_ORG_ID = os.getenv('TURNKEY_ORGANIZATION_ID')
 TURNKEY_DISBURSEMENT_WALLET_ID = os.getenv('TURNKEY_DISBURSEMENT_WALLET_ID')
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "5014800072"))
-if not all([TURNKEY_API_PUBLIC_KEY, TURNKEY_API_PRIVATE_KEY, TURNKEY_ORG_ID, TURNKEY_DISBURSEMENT_WALLET_ID]):
-    raise ValueError("Missing Turnkey environment variables in .env")
+if not TEST_MODE:
+    if not all([TURNKEY_API_PUBLIC_KEY, TURNKEY_API_PRIVATE_KEY, TURNKEY_ORG_ID, TURNKEY_DISBURSEMENT_WALLET_ID]):
+        raise ValueError("Missing Turnkey environment variables in .env")
 
 # Log initial environment details
 logger.info(f"Current working directory: {os.getcwd()}")
@@ -95,10 +113,19 @@ class TurnkeySigner:
             # Use WalletManager to get active wallet
             from services.wallet_manager import WalletManager
             wallet_manager = WalletManager(self.app_context.db_pool)
-            active_wallet = await wallet_manager.get_active_wallet(telegram_id)
+            active_wallet = await wallet_manager.get_active_wallet(telegram_id, app_context)
             
             if not active_wallet:
-                raise ValueError(f"No active wallet found for telegram_id {telegram_id}. Create one via Node.js backend.")
+                # In TEST_MODE, fallback to users.public_key directly without Turnkey
+                if self.app_context.is_test_mode:
+                    async with self.app_context.db_pool.acquire() as conn2:
+                        row = await conn2.fetchrow("SELECT public_key FROM users WHERE telegram_id = $1", int(telegram_id))
+                        if row and row['public_key']:
+                            active_wallet = row['public_key']
+                        else:
+                            raise ValueError(f"No wallet found for telegram_id {telegram_id}. Create a user row first.")
+                else:
+                    raise ValueError(f"No active wallet found for telegram_id {telegram_id}. Create one via Node.js backend.")
             
             # For legacy users, get session data from users table
             # For new users, get wallet data from turnkey_wallets table
@@ -182,7 +209,7 @@ class TurnkeySigner:
                     temp_private = session_data["temp_api_private_key"]
 
         try:
-            tx_envelope = TransactionEnvelope.from_xdr(transaction_xdr, Network.PUBLIC_NETWORK_PASSPHRASE)  # Adjust network if mainnet
+            tx_envelope = TransactionEnvelope.from_xdr(transaction_xdr, self.app_context.network_passphrase)
         except Exception as e:
             logger.error(f"Failed to parse transaction XDR: {str(e)}")
             raise ValueError(f"Invalid transaction XDR: {str(e)}")
@@ -246,17 +273,27 @@ class TurnkeySigner:
             raise ValueError(f"XDR serialization failed: {str(e)}")
 
 async def init_db_pool():
-    ssl_context = ssl.create_default_context(cafile='/home/ubuntu/photonbot-live/global-bundle.pem')
-    ssl_context.check_hostname = True
-    ssl_context.verify_mode = ssl.CERT_REQUIRED
-    pool = await asyncpg.create_pool(
+    test_mode = os.getenv('TEST_MODE', 'false').lower() == 'true'  # This is okay - it's in init function
+    db_ssl = os.getenv('DB_SSL', 'verify').lower()
+    if test_mode:
+        resolved_host = os.getenv('DB_HOST_TEST', 'localhost')
+        resolved_port = int(os.getenv('DB_PORT_TEST', os.getenv('DB_PORT', 5434)))
+    else:
+        resolved_host = os.getenv('DB_HOST', 'lumenbro-turnkey.cz2imkksk7b4.us-west-1.rds.amazonaws.com')
+        resolved_port = int(os.getenv('DB_PORT', 5434))
+    db_params = dict(
         user=os.getenv('DB_USER', 'botadmin'),
         password=os.getenv('DB_PASSWORD'),
         database=os.getenv('DB_NAME', 'postgres'),
-        host=os.getenv('DB_HOST', 'lumenbro-turnkey.cz2imkksk7b4.us-west-1.rds.amazonaws.com'),
-        port=int(os.getenv('DB_PORT', 5434)),
-        ssl=ssl_context  # Pass SSLContext, not sslrootcert
+        host=resolved_host,
+        port=resolved_port,
     )
+    if not test_mode and db_ssl not in ('disable', 'false', 'none'):
+        ssl_context = ssl.create_default_context(cafile='/home/ubuntu/photonbot-live/global-bundle.pem')
+        ssl_context.check_hostname = True
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+        db_params['ssl'] = ssl_context
+    pool = await asyncpg.create_pool(**db_params)
     async with pool.acquire() as conn:
         # Create schema (idempotent)
         await conn.execute("""
@@ -359,18 +396,13 @@ async def init_db_pool():
                     ALTER TABLE users ADD COLUMN recovery_org_id TEXT;
                 END IF;
                 
+                -- Add custom amount column for buy menu
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns 
-                    WHERE table_name = 'users' AND column_name = 'recovery_session_expires'
+                    WHERE table_name = 'users' AND column_name = 'custom_amount'
                 ) THEN
-                    ALTER TABLE users ADD COLUMN recovery_session_expires TIMESTAMP;
-                END IF;
-                
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns 
-                    WHERE table_name = 'users' AND column_name = 'recovery_api_key_id'
-                ) THEN
-                    ALTER TABLE users ADD COLUMN recovery_api_key_id TEXT;
+                    ALTER TABLE users ADD COLUMN custom_amount DECIMAL(20,7) DEFAULT NULL;
+                    COMMENT ON COLUMN users.custom_amount IS 'User''s preferred XLM amount for quick buy (in XLM, not asset amounts)';
                 END IF;
             END $$;
             
@@ -463,7 +495,7 @@ async def schedule_daily_payout(app_context, streaming_service, chat_id=None):
         await asyncio.sleep((next_run - now).total_seconds())
         logger.info("Running daily payout at %s UTC", datetime.now(ZoneInfo("UTC")))
         try:
-            await daily_payout(app_context.db_pool, app_context.db_pool, app_context.bot, chat_id, app_context)
+            await daily_payout(app_context.db_pool, app_context.bot, chat_id, app_context)
         except Exception as e:
             logger.error(f"Daily payout failed: {str(e)}", exc_info=True)
             if chat_id:
@@ -531,13 +563,31 @@ async def run_master():
 
     await setup_fee_wallet(app_context)
 
-    app_context.turnkey_signer = TurnkeySigner(app_context)
-    app_context.kms_service = KMSService()
+    # In TEST_MODE, override key generation to fixed local signer key
+    if TEST_MODE:
+        test_secret = os.getenv('TEST_SIGNER_SECRET')
+        if not test_secret:
+            raise ValueError('TEST_SIGNER_SECRET must be set when TEST_MODE=true')
+        test_public = Keypair.from_secret(test_secret).public_key
+        async def generate_keypair_for_test(telegram_id):
+            return test_public, (b"", b"")
+        app_context.generate_keypair = generate_keypair_for_test
 
-    async def wrapped_sign_transaction(telegram_id, transaction_xdr):
-        return await app_context.turnkey_signer.sign_transaction(telegram_id, transaction_xdr)
-    app_context.sign_transaction = wrapped_sign_transaction
-    app_context.transaction_signer = wrapped_sign_transaction
+    # Configure signing based on TEST_MODE
+    if TEST_MODE:
+        from services.local_signer import LocalSigner
+        local_signer = LocalSigner(app_context)
+        async def wrapped_sign_transaction(telegram_id, transaction_xdr):
+            return await local_signer.sign_transaction(telegram_id, transaction_xdr)
+        app_context.sign_transaction = wrapped_sign_transaction
+        app_context.transaction_signer = wrapped_sign_transaction
+    else:
+        app_context.turnkey_signer = TurnkeySigner(app_context)
+        app_context.kms_service = KMSService()
+        async def wrapped_sign_transaction(telegram_id, transaction_xdr):
+            return await app_context.turnkey_signer.sign_transaction(telegram_id, transaction_xdr)
+        app_context.sign_transaction = wrapped_sign_transaction
+        app_context.transaction_signer = wrapped_sign_transaction
 
     async def wrapped_load_public_key(telegram_id):
         return await load_public_key(app_context, telegram_id)

@@ -11,8 +11,9 @@ import asyncio
 import time
 import logging
 
-TESTNET = Network.PUBLIC_NETWORK_PASSPHRASE
-logging.basicConfig(level=logging.DEBUG)
+"""Use app_context.network_passphrase everywhere; constant removed."""
+# Keep module logging level reasonable; top-level config is in main
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 logger.info("Loaded core/stellar.py")
@@ -94,7 +95,7 @@ async def build_and_submit_transaction(telegram_id, db_pool, operations, app_con
     
     tx_builder = TransactionBuilder(
         source_account=account,
-        network_passphrase=TESTNET,
+        network_passphrase=app_context.network_passphrase,
         base_fee=base_fee
     ).add_time_bounds(0, int(time.time()) + 900)
     
@@ -108,7 +109,7 @@ async def build_and_submit_transaction(telegram_id, db_pool, operations, app_con
     
     # Send to Turnkey for signing using session
     signed_xdr = await app_context.sign_transaction(telegram_id, xdr)
-    tx_envelope = TransactionEnvelope.from_xdr(signed_xdr, TESTNET)
+    tx_envelope = TransactionEnvelope.from_xdr(signed_xdr, app_context.network_passphrase)
     
     url = f"{app_context.horizon_url}/transactions_async"
     async with aiohttp.ClientSession() as session:

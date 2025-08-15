@@ -1,7 +1,7 @@
 import asyncio
 from dotenv import load_dotenv
 import os
-from stellar_sdk import Server
+from stellar_sdk import Server, Network
 from stellar_sdk.client.aiohttp_client import AiohttpClient
 import logging
 
@@ -41,7 +41,20 @@ class AppContext:
         self.dp = None
         self.tasks = []
         self.queue = queue
-        self.horizon_url = "https://horizon.stellar.org"
+        
+        # Centralized TEST_MODE flag
+        self.is_test_mode = os.getenv('TEST_MODE', 'false').lower() == 'true'
+        
+        # Network configuration (defaults to PUBLIC if not set)
+        stellar_network = os.getenv("STELLAR_NETWORK", "PUBLIC").upper()
+        horizon_public = os.getenv("HORIZON_URL_PUBLIC", "https://horizon.stellar.org")
+        horizon_testnet = os.getenv("HORIZON_URL_TESTNET", "https://horizon-testnet.stellar.org")
+        if stellar_network == "TESTNET":
+            self.network_passphrase = Network.TESTNET_NETWORK_PASSPHRASE
+            self.horizon_url = horizon_testnet
+        else:
+            self.network_passphrase = Network.PUBLIC_NETWORK_PASSPHRASE
+            self.horizon_url = horizon_public
         self.client = AiohttpClient()
         self.server = Server(self.horizon_url, client=self.client)
         self.base_fee = 300  # Default base fee in stroops
