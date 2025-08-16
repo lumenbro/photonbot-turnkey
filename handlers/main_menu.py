@@ -2261,7 +2261,7 @@ def create_buy_menu_text(asset_info, asset_code: str, asset_issuer: str, availab
     text += f"`{asset_issuer}`\n\n"
     
     if asset_info:
-        # Market data section using PriceService data
+        # Compact market data section - prioritize most important info
         text += "**📊 Market Data:**\n"
         if asset_info.get('price_usd'):
             text += f"• Price: ${asset_info['price_usd']:.8f}\n"
@@ -2274,10 +2274,22 @@ def create_buy_menu_text(asset_info, asset_code: str, asset_issuer: str, availab
         if asset_info.get('supply'):
             text += f"• Supply: {asset_info['supply']:,.0f}\n"
         
-        if asset_info.get('domain'):
+        # Compact community info on one line if space allows
+        community_info = []
+        if asset_info.get('holders_count'):
+            community_info.append(f"Holders: {asset_info['holders_count']:,}")
+        if asset_info.get('trustlines_count'):
+            community_info.append(f"Trustlines: {asset_info['trustlines_count']:,}")
+        if community_info:
+            text += f"• Community: {' | '.join(community_info)}\n"
+        
+        # Domain and tags only if they exist and are meaningful
+        if asset_info.get('domain') and asset_info['domain'] not in ['', 'stellar.org']:
             text += f"• Domain: {asset_info['domain']}\n"
-        if asset_info.get('tags'):
-            text += f"• Tags: {', '.join(asset_info['tags'])}\n"
+        if asset_info.get('tags') and len(asset_info['tags']) > 0 and asset_info['tags'] != ['']:
+            # Limit tags to first 3 to save space
+            display_tags = asset_info['tags'][:3]
+            text += f"• Tags: {', '.join(display_tags)}\n"
     
     # User balance
     text += f"\n**💰 Your Balance:** {available_xlm:.7f} XLM\n\n"
@@ -2758,7 +2770,7 @@ def create_sell_menu_text(asset_info, asset_code: str, asset_issuer: str, asset_
     text += "\n\n"
     
     if asset_info:
-        # Market data section using PriceService data
+        # Compact market data section - prioritize most important info
         text += "**📊 Market Data:**\n"
         if asset_info.get('price_usd'):
             text += f"• Price: ${asset_info['price_usd']:.8f}\n"
@@ -2771,10 +2783,22 @@ def create_sell_menu_text(asset_info, asset_code: str, asset_issuer: str, asset_
         if asset_info.get('supply'):
             text += f"• Supply: {asset_info['supply']:,.0f}\n"
         
-        if asset_info.get('domain'):
+        # Compact community info on one line if space allows
+        community_info = []
+        if asset_info.get('holders_count'):
+            community_info.append(f"Holders: {asset_info['holders_count']:,}")
+        if asset_info.get('trustlines_count'):
+            community_info.append(f"Trustlines: {asset_info['trustlines_count']:,}")
+        if community_info:
+            text += f"• Community: {' | '.join(community_info)}\n"
+        
+        # Domain and tags only if they exist and are meaningful
+        if asset_info.get('domain') and asset_info['domain'] not in ['', 'stellar.org']:
             text += f"• Domain: {asset_info['domain']}\n"
-        if asset_info.get('tags'):
-            text += f"• Tags: {', '.join(asset_info['tags'])}\n"
+        if asset_info.get('tags') and len(asset_info['tags']) > 0 and asset_info['tags'] != ['']:
+            # Limit tags to first 3 to save space
+            display_tags = asset_info['tags'][:3]
+            text += f"• Tags: {', '.join(display_tags)}\n"
     
     text += "\n**Select percentage to sell:**"
     
