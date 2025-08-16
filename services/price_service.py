@@ -187,6 +187,11 @@ class PriceService:
                     xlm_usd = await self.fetch_xlm_usd_price()
                     price_usd = price_xlm * xlm_usd if xlm_usd > 0 else 0.0
                     
+                    # Convert supply from smallest unit to human-readable format
+                    # Most Stellar assets use 7 decimal places like XLM
+                    raw_supply = data.get("supply", 0.0)
+                    supply = raw_supply / 10**7 if raw_supply > 0 else 0.0
+                    
                     return {
                         "asset_code": asset_code,
                         "asset_issuer": asset_issuer,
@@ -196,7 +201,7 @@ class PriceService:
                         "price_xlm": price_xlm,
                         "market_cap_usd": data.get("market_cap", 0.0),
                         "volume_24h": data.get("volume_24h", 0.0),
-                        "supply": data.get("supply", 0.0),
+                        "supply": supply,
                         "holders_count": data.get("holders_count", 0),
                         "trustlines_count": data.get("trustlines_count", 0),
                         "tags": data.get("tags", [])
