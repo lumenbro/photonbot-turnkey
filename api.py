@@ -4,7 +4,7 @@ from aiohttp import web
 import json
 import time
 from decimal import Decimal
-from stellar_sdk import TransactionEnvelope, TransactionBuilder, Asset, PathPaymentStrictReceive, PathPaymentStrictSend
+from stellar_sdk import TransactionEnvelope, Asset, PathPaymentStrictReceive, PathPaymentStrictSend, Payment
 import logging
 from datetime import datetime, timedelta
 import jwt
@@ -16,10 +16,12 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = None
 JWT_SECRET = None
-_tx_counter = 0  # Global counter for mock tx_hash
 
 async def jwt_middleware(app, handler):
     async def middleware(request):
+        # Allow unauthenticated access to Telegram auth endpoint
+        if request.path == '/api/auth/telegram':
+            return await handler(request)
         token = request.headers.get('Authorization', '').replace('Bearer ', '')
         if not token:
             raise web.HTTPUnauthorized(text='Missing JWT')
@@ -105,91 +107,220 @@ async def api_check_status(request):
 
     return web.json_response({'is_founder': is_founder, 'has_referrer': has_referrer, 'fee_percentage': fee_percentage})
 
+async def get_user_authenticator_type(request, telegram_id: int):
+    """Determine user authenticator type and signing method, mirroring Node logic where possible."""
+    app_context = request.app['app_context']
+    async with app_context.db_pool.acquire() as conn:
+        user = await conn.fetchrow(
+            """
+            SELECT 
+                u.telegram_id,
+                u.kms_encrypted_session_key,
+                u.kms_key_id,
+                u.temp_api_public_key,
+                u.temp_api_private_key,
+                u.session_expiry,
+                u.source_old_db
+            FROM users u
+            WHERE u.telegram_id = $1
+            """,
+            telegram_id,
+        )
+        wallet_row = await conn.fetchrow(
+            """
+            SELECT turnkey_sub_org_id, turnkey_key_id, public_key
+            FROM turnkey_wallets 
+            WHERE telegram_id = $1 AND is_active = TRUE
+            """,
+            telegram_id,
+        )
+
+    if not user:
+        raise web.HTTPBadRequest(text='User not found')
+
+    authenticator_type = 'unknown'
+    signing_method = 'unknown'
+    has_active_session = False
+
+    # KMS session (new users)
+    if user['kms_encrypted_session_key'] and user['kms_key_id']:
+        authenticator_type = 'session_keys'
+        signing_method = 'python_bot_kms'
+        has_active_session = True
+    # Turnkey wallet present (treat as Telegram Cloud client-side keys or server-side Turnkey)
+    elif wallet_row:
+        authenticator_type = 'telegram_cloud'
+        signing_method = 'python_bot_tg_cloud'
+        has_active_session = True
+    # Legacy session keys
+    elif user['temp_api_public_key'] and user['temp_api_private_key']:
+        authenticator_type = 'legacy'
+        signing_method = 'python_bot_legacy'
+        has_active_session = True
+    # Legacy migrated without active session
+    elif user['source_old_db']:
+        authenticator_type = 'legacy'
+        signing_method = 'python_bot_legacy'
+        has_active_session = False
+
+    # Session expiry check
+    session_expiry = user['session_expiry']
+    if has_active_session and session_expiry:
+        # Compare using naive UTC
+        if session_expiry < datetime.utcnow():
+            has_active_session = False
+            signing_method = 'session_expired'
+
+    return {
+        'authenticator_type': authenticator_type,
+        'signing_method': signing_method,
+        'has_active_session': has_active_session,
+        'turnkey_sub_org_id': wallet_row['turnkey_sub_org_id'] if wallet_row else None,
+        'turnkey_key_id': wallet_row['turnkey_key_id'] if wallet_row else None,
+    }
+
+def _detect_fee_in_tx(tx_env: TransactionEnvelope, fee_wallet: str) -> Decimal:
+    """Scan transaction for a native payment to the fee wallet and return that amount."""
+    try:
+        for op in tx_env.transaction.operations:
+            if isinstance(op, Payment):
+                if op.destination == fee_wallet and op.asset.is_native():
+                    return Decimal(str(op.amount))
+    except Exception:
+        pass
+    return Decimal('0')
+
+async def _estimate_xlm_volume_from_tx(tx_env: TransactionEnvelope, app_context) -> float:
+    """Estimate XLM volume for referrals/fees logging.
+    - Payment: native -> amount; non-native -> strict-send price to XLM
+    - Path payments: consider both send and dest side; use larger XLM equivalent
+    """
+    try:
+        ops = tx_env.transaction.operations
+        if not ops:
+            return 0.0
+        op = ops[0]
+        if isinstance(op, Payment):
+            if op.asset.is_native():
+                return float(op.amount)
+            return await get_estimated_xlm_value(op.asset, float(op.amount), app_context)
+        if isinstance(op, PathPaymentStrictSend):
+            send_xlm = await (get_estimated_xlm_value(op.send_asset, float(op.send_amount), app_context) if not op.send_asset.is_native() else float(op.send_amount))
+            dest_xlm = await (get_estimated_xlm_value(op.dest_asset, float(op.dest_min), app_context) if not op.dest_asset.is_native() else float(op.dest_min))
+            return float(max(send_xlm, dest_xlm))
+        if isinstance(op, PathPaymentStrictReceive):
+            send_xlm = await (get_estimated_xlm_value(op.send_asset, float(op.send_max), app_context) if not op.send_asset.is_native() else float(op.send_max))
+            dest_xlm = await (get_estimated_xlm_value(op.dest_asset, float(op.dest_amount), app_context) if not op.dest_asset.is_native() else float(op.dest_amount))
+            return float(max(send_xlm, dest_xlm))
+    except Exception as e:
+        logger.warning(f"Failed to estimate XLM volume from tx: {str(e)}")
+    return 0.0
+
+async def api_get_authenticator(request):
+    telegram_id = int(request['telegram_id'])
+    app_context = request.app['app_context']
+    info = await get_user_authenticator_type(request, telegram_id)
+
+    # Resolve active public key: prefer active Turnkey wallet, else users.public_key
+    async with app_context.db_pool.acquire() as conn:
+        wallet_row = await conn.fetchrow(
+            "SELECT public_key FROM turnkey_wallets WHERE telegram_id = $1 AND is_active = TRUE",
+            telegram_id,
+        )
+        if wallet_row and wallet_row['public_key']:
+            active_public_key = wallet_row['public_key']
+        else:
+            user_row = await conn.fetchrow(
+                "SELECT public_key FROM users WHERE telegram_id = $1",
+                telegram_id,
+            )
+            active_public_key = user_row['public_key'] if user_row else None
+
+        is_founder = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM founders WHERE telegram_id = $1)", telegram_id
+        )
+        has_referrer = await conn.fetchval(
+            "SELECT COUNT(*) FROM referrals WHERE referee_id = $1", telegram_id
+        ) > 0
+
+    fee_percentage = 0.01
+    if is_founder:
+        fee_percentage = 0.001
+    elif has_referrer:
+        fee_percentage = 0.009
+
+    return web.json_response({
+        'user': {
+            'telegram_id': telegram_id,
+            'public_key': active_public_key,
+        },
+        'authenticator': info,
+        'fee_status': {
+            'is_founder': is_founder,
+            'has_referrer': has_referrer,
+            'fee_percentage': fee_percentage,
+        },
+    })
+
 async def api_sign(request):
-    global _tx_counter
     app_context = request.app['app_context']
     telegram_id = int(request['telegram_id'])  # Convert to integer
     data = await request.json()
     xdr = data.get('xdr')
-    action_type = data.get('action_type')
-    amount = Decimal(str(data.get('amount', 0)))
-    include_fee = data.get('include_fee', False)  # Default to False for external use
+    action_type = data.get('action_type', 'payment')
+    include_fee = data.get('include_fee', False)
 
-    # Parse asset from XDR (simplified for mock testing)
-    send_asset = Asset.native()  # Default to XLM; adjust if XDR provides asset info
+    if not xdr:
+        raise web.HTTPBadRequest(text='Missing XDR')
+
+    # Validate/parse XDR
     try:
-        tx = TransactionEnvelope.from_xdr(xdr, request.app['network_passphrase'])
-        if tx.transaction.operations:
-            op = tx.transaction.operations[0]
-            if isinstance(op, (PathPaymentStrictReceive, PathPaymentStrictSend)):
-                send_asset = op.send_asset
+        tx_env = TransactionEnvelope.from_xdr(xdr, request.app['network_passphrase'])
     except Exception as e:
-        logger.warning(f"Could not parse asset from XDR, defaulting to XLM: {str(e)}")
+        logger.error(f"Invalid XDR from user {telegram_id}: {str(e)}")
+        raise web.HTTPBadRequest(text='Invalid XDR')
 
-    # Bypass XDR validation for mock testing
-    if xdr == "mock-xdr" or xdr.startswith("AAAA"):
-        logger.warning("Using mock or minimal XDR for testing")
-    else:
-        try:
-            tx = TransactionEnvelope.from_xdr(xdr, request.app['network_passphrase'])
-        except Exception as e:
-            logger.error(f"Invalid XDR from user {telegram_id}: {str(e)}")
-            raise web.HTTPBadRequest(text='Invalid XDR')
+    # Determine authenticator and session
+    auth_info = await get_user_authenticator_type(request, telegram_id)
+    if not auth_info['has_active_session']:
+        return web.json_response({
+            'error': 'No active session',
+            'signing_method': auth_info['signing_method'],
+            'requires_login': True
+        }, status=401)
 
-    # Fetch status for fee adjustment
-    async def get_status(telegram_id):
-        async with app_context.db_pool.acquire() as conn:
-            is_founder = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM founders WHERE telegram_id = $1)", telegram_id)
-            has_referrer = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE referee_id = $1", telegram_id) > 0
-        fee_percentage = 0.01  # Default 1% base rate
-        if is_founder:
-            fee_percentage = 0.001  # 0.1% for founders (pioneers)
-        elif has_referrer:
-            fee_percentage = 0.009  # 0.9% for referred users
-        return {'is_founder': is_founder, 'has_referrer': has_referrer, 'fee_percentage': fee_percentage}
+    # Detect fee already included in the transaction
+    detected_fee = _detect_fee_in_tx(tx_env, request.app['fee_wallet'])
+    fee_amount = float(detected_fee)
+    if not include_fee and fee_amount == 0.0:
+        logger.debug('include_fee is false and no fee op detected; proceeding without modifying XDR')
 
-    status_data = await get_status(telegram_id)
-    fee_percentage = status_data.get('fee_percentage', 0.01)  # Default to 1% if missing
-    xlm_volume = float(amount) if send_asset.is_native() else await get_estimated_xlm_value(send_asset, float(amount), app_context)
-    fee = Decimal('0.0')
-    transaction = None
-    if include_fee:
-        # Calculate fee with adjusted percentage (simplified to 1% base rate for now)
-        fee = Decimal(str(round(0.01 * xlm_volume, 7)))  # 1% base rate
-        # Skip Horizon call for mock testing; assume balance is sufficient
-        transaction = TransactionBuilder.from_xdr(xdr, request.app['network_passphrase']) if xdr != "mock-xdr" and not xdr.startswith("AAAA") else None
-        if transaction:
-            transaction.append_payment_op(
-                destination=request.app['fee_wallet'],
-                asset=Asset.native(),
-                amount=str(fee)
-            )
-            # Trigger referral shares if applicable
-            if status_data.get('has_referrer', False):
-                await calculate_referral_shares(app_context.db_pool, telegram_id, float(fee))
-
-    # Log trading volume for referrals with incremental mock hash
-    _tx_counter += 1
-    tx_hash = f"mock-tx-{_tx_counter}-{int(time.time())}"
-    await log_xlm_volume(telegram_id, xlm_volume, tx_hash, app_context.db_pool)
-
+    # Compute tx hash (pre-sign)
     try:
-        signed_xdr = await app_context.sign_transaction(telegram_id, xdr if xdr.startswith("AAAA") or xdr == "mock-xdr" else transaction.to_xdr() if transaction else xdr)
-        tx_hash = f"mock-tx-{_tx_counter}-{int(time.time())}"  # Unique hash for response
-        # Skip fees table insert to avoid modifying live DB
-        # async with request.app['db_pool'].acquire() as conn:
-        #     await conn.execute(
-        #         "INSERT INTO fees (telegram_id, action_type, amount, fee, tx_hash) VALUES ($1, $2, $3, $4, $5)",
-        #         telegram_id, action_type, float(amount), float(fee), tx_hash
-        #     )
+        tx_hash_hex = tx_env.hash().hex()
+    except Exception:
+        tx_hash_hex = f"tx-{int(time.time())}"
+
+    # Estimate XLM volume from transaction contents for logging
+    xlm_volume = await _estimate_xlm_volume_from_tx(tx_env, app_context)
+    try:
+        await log_xlm_volume(telegram_id, xlm_volume, tx_hash_hex, app_context.db_pool)
+    except Exception as e:
+        logger.warning(f"Failed to log XLM volume: {str(e)}")
+
+    # Sign using the configured signer (Local in TEST_MODE, Turnkey in prod)
+    try:
+        signed_xdr = await app_context.sign_transaction(telegram_id, xdr)
     except Exception as e:
         logger.error(f"Signing failed for user {telegram_id}: {str(e)}")
         raise web.HTTPInternalServerError(text=f'Signing failed: {str(e)}')
 
     return web.json_response({
+        'success': True,
         'signed_xdr': signed_xdr,
-        'hash': tx_hash,
-        'fee': float(fee)
+        'hash': tx_hash_hex,
+        'fee': fee_amount,
+        'signing_method': auth_info['signing_method']
     })
 
 async def start_server(app_context):
@@ -214,6 +345,7 @@ async def start_server(app_context):
 
         web_app.router.add_post('/api/auth/telegram', api_auth_telegram)
         web_app.router.add_post('/api/check_status', api_check_status)
+        web_app.router.add_get('/api/authenticator', api_get_authenticator)
         web_app.router.add_post('/api/sign', api_sign)
 
         runner = web.AppRunner(web_app)
