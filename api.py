@@ -65,21 +65,22 @@ async def api_auth_telegram(request):
     async with app_context.db_pool.acquire() as conn:
         user = await conn.fetchrow("SELECT telegram_id, public_key FROM users WHERE telegram_id = $1", int(telegram_id))
         if not user:
-            if callable(app_context.generate_keypair):
+            if app_context.is_test_mode and callable(app_context.generate_keypair):
+                # Only create users in TEST_MODE
                 public_key, (encrypted_secret, encrypted_data_key) = await app_context.generate_keypair(telegram_id)
+                await conn.execute(
+                    "INSERT INTO users (telegram_id, public_key, encrypted_secret, encrypted_data_key) VALUES ($1, $2, $3, $4)",
+                    int(telegram_id), public_key, encrypted_secret, encrypted_data_key
+                )
+                referral_code = f"ref-api-{telegram_id}"
+                await conn.execute(
+                    "UPDATE users SET referral_code = $1 WHERE telegram_id = $2",
+                    referral_code, int(telegram_id)
+                )
+                logger.info(f"Registered new user {telegram_id} with public_key {public_key} and referral_code {referral_code}")
             else:
-                # Fallback: no key generation, require pre-insert
-                raise web.HTTPInternalServerError(text='Key generation not configured')
-            await conn.execute(
-                "INSERT INTO users (telegram_id, public_key, encrypted_secret, encrypted_data_key) VALUES ($1, $2, $3, $4)",
-                int(telegram_id), public_key, encrypted_secret, encrypted_data_key
-            )
-            referral_code = f"ref-api-{telegram_id}"
-            await conn.execute(
-                "UPDATE users SET referral_code = $1 WHERE telegram_id = $2",
-                referral_code, int(telegram_id)
-            )
-            logger.info(f"Registered new user {telegram_id} with public_key {public_key} and referral_code {referral_code}")
+                # In production, require user to exist (created via Node.js/Turnkey)
+                raise web.HTTPBadRequest(text='User not found. Please register via the mini-app first.')
         else:
             public_key = user['public_key']
             logger.debug(f"Using existing public_key: {public_key} for telegram_id: {telegram_id}")
