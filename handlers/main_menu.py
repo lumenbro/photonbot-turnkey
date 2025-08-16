@@ -2286,7 +2286,18 @@ def create_buy_menu_text(asset_info, asset_code: str, asset_issuer: str, availab
     if asset_info and asset_info.get('price_xlm') and asset_info['price_xlm'] > 0:
         tokens_per_xlm = 1 / asset_info['price_xlm']
         text += f"**💡 Quick Buy Preview:**\n"
-        text += f"1 XLM ≈ {tokens_per_xlm:,.0f} {asset_code}\n\n"
+        # Format based on the magnitude of the number
+        if tokens_per_xlm >= 1000:
+            # For large numbers, use comma formatting with no decimals
+            formatted_tokens = f"{tokens_per_xlm:,.0f}"
+        elif tokens_per_xlm >= 1:
+            # For medium numbers, show up to 2 decimal places
+            formatted_tokens = f"{tokens_per_xlm:.2f}"
+        else:
+            # For small numbers (like stablecoins), show more decimal places
+            formatted_tokens = f"{tokens_per_xlm:.6f}"
+        
+        text += f"1 XLM ≈ {formatted_tokens} {asset_code}\n\n"
     
     text += "**Select an amount to buy:**"
     
