@@ -309,6 +309,18 @@ async def api_sign(request):
     except Exception as e:
         logger.warning(f"Failed to log XLM volume: {str(e)}")
 
+    # Calculate referral rewards (same logic as Node.js)
+    if fee_amount > 0:
+        logger.info(f"🔗 Calculating referral rewards for user {telegram_id} with fee: {fee_amount} XLM")
+        try:
+            await calculate_referral_shares(app_context.db_pool, telegram_id, fee_amount)
+            logger.info(f"✅ Referral rewards calculated for user {telegram_id}: {fee_amount} XLM fee")
+        except Exception as e:
+            logger.warning(f"Failed to calculate referral rewards: {str(e)}")
+            # Don't fail the transaction if referral calculation fails
+    else:
+        logger.debug(f"No fee detected for user {telegram_id}, skipping referral calculation")
+
     # Sign using the configured signer (Local in TEST_MODE, Turnkey in prod)
     try:
         signed_xdr = await app_context.sign_transaction(telegram_id, xdr)
@@ -321,7 +333,8 @@ async def api_sign(request):
         'signed_xdr': signed_xdr,
         'hash': tx_hash_hex,
         'fee': fee_amount,
-        'signing_method': auth_info['signing_method']
+        'signing_method': auth_info['signing_method'],
+        'referral_rewards_calculated': fee_amount > 0
     })
 
 async def start_server(app_context):
