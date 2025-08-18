@@ -205,9 +205,30 @@ async def perform_buy(telegram_id, db_pool, asset_code, asset_issuer, amount, ap
         raise ValueError(f"No viable path found to buy {dest_amount} {asset_code} with XLM - insufficient liquidity")
     
     max_source_amount = Decimal(selected_path["source_amount"])
-    slippage = Decimal(str(getattr(app_context, 'slippage', 0.05)))
+    
+    # Get user-specific slippage with fallback to default
+    user_slippage = None
+    try:
+        async with db_pool.acquire() as conn:
+            user_slippage = await conn.fetchval(
+                "SELECT slippage FROM users WHERE telegram_id = $1", telegram_id
+            )
+    except Exception as e:
+        logger.warning(f"Could not fetch user slippage for {telegram_id}: {e}")
+    
+    # Use user slippage if set, otherwise fall back to default
+    if user_slippage is not None:
+        slippage = Decimal(str(user_slippage))
+        logger.info(f"Using user slippage: {slippage} ({slippage*100:.1f}%) for user {telegram_id}")
+    else:
+        slippage = Decimal(str(getattr(app_context, 'slippage', 0.05)))
+        logger.info(f"Using default slippage: {slippage} ({slippage*100:.1f}%) for user {telegram_id}")
+    
+    # Apply multi-hop penalty if path has intermediate assets
     if selected_path["path"]:
         slippage *= 2
+        logger.info(f"Multi-hop path detected, doubling slippage to: {slippage} ({slippage*100:.1f}%)")
+    
     max_source_amount_with_slippage = (max_source_amount * (1 + slippage)).quantize(Decimal('0.0000001'))
     max_source_amount_str = format(max_source_amount_with_slippage, 'f')
     
@@ -406,9 +427,30 @@ async def perform_sell(telegram_id, db_pool, asset_code, asset_issuer, amount, a
         raise ValueError(f"No viable path found to sell {send_amount} {asset_code} for XLM - insufficient liquidity")
     
     max_dest_amount = Decimal(selected_path["destination_amount"])
-    slippage = Decimal(str(getattr(app_context, 'slippage', 0.05)))
+    
+    # Get user-specific slippage with fallback to default
+    user_slippage = None
+    try:
+        async with db_pool.acquire() as conn:
+            user_slippage = await conn.fetchval(
+                "SELECT slippage FROM users WHERE telegram_id = $1", telegram_id
+            )
+    except Exception as e:
+        logger.warning(f"Could not fetch user slippage for {telegram_id}: {e}")
+    
+    # Use user slippage if set, otherwise fall back to default
+    if user_slippage is not None:
+        slippage = Decimal(str(user_slippage))
+        logger.info(f"Using user slippage: {slippage} ({slippage*100:.1f}%) for user {telegram_id}")
+    else:
+        slippage = Decimal(str(getattr(app_context, 'slippage', 0.05)))
+        logger.info(f"Using default slippage: {slippage} ({slippage*100:.1f}%) for user {telegram_id}")
+    
+    # Apply multi-hop penalty if path has intermediate assets
     if selected_path["path"]:
         slippage *= 2
+        logger.info(f"Multi-hop path detected, doubling slippage to: {slippage} ({slippage*100:.1f}%)")
+    
     min_dest_amount = (max_dest_amount * (1 - slippage)).quantize(Decimal('0.0000001'))
     min_dest_amount_str = format(min_dest_amount, 'f')
     

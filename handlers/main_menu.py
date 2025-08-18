@@ -56,6 +56,9 @@ class TrustlineStates(StatesGroup):
     waiting_for_asset_to_add = State()
     waiting_for_asset_to_remove = State()
 
+class SettingsStates(StatesGroup):
+    waiting_for_slippage = State()
+
 
 async def get_welcome_text(telegram_id, app_context):
     """Get enhanced welcome text with session status indicator and wallet details"""
@@ -139,6 +142,47 @@ async def clear_custom_amount(telegram_id: int, db_pool):
     except Exception as e:
         logger.error(f"Error clearing custom amount for user {telegram_id}: {e}")
 
+async def get_user_slippage(telegram_id: int, db_pool) -> float:
+    """Get user's saved slippage percentage from database"""
+    try:
+        async with db_pool.acquire() as conn:
+            slippage = await conn.fetchval(
+                "SELECT slippage FROM users WHERE telegram_id = $1", telegram_id
+            )
+            return float(slippage) if slippage else None
+    except Exception as e:
+        logger.error(f"Error getting slippage for user {telegram_id}: {e}")
+        return None
+
+async def save_user_slippage(telegram_id: int, slippage: float, db_pool):
+    """Save user's slippage percentage to database"""
+    try:
+        # Validate slippage range (0.1% to 50%)
+        if slippage < 0.001 or slippage > 0.5:
+            raise ValueError("Slippage must be between 0.1% (0.001) and 50% (0.5)")
+        
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET slippage = $1 WHERE telegram_id = $2", 
+                slippage, telegram_id
+            )
+            logger.info(f"Saved slippage {slippage} ({slippage*100:.1f}%) for user {telegram_id}")
+    except Exception as e:
+        logger.error(f"Error saving slippage for user {telegram_id}: {e}")
+        raise
+
+async def clear_user_slippage(telegram_id: int, db_pool):
+    """Clear user's saved slippage percentage from database (use default)"""
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET slippage = NULL WHERE telegram_id = $1", 
+                telegram_id
+            )
+            logger.info(f"Cleared custom slippage for user {telegram_id}")
+    except Exception as e:
+        logger.error(f"Error clearing slippage for user {telegram_id}: {e}")
+
 main_menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Buy", callback_data="buy"),
      InlineKeyboardButton(text="Sell", callback_data="sell")],
@@ -149,6 +193,7 @@ main_menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Add Trustline", callback_data="add_trustline"),
      InlineKeyboardButton(text="Remove Trustline", callback_data="remove_trustline")],
     [InlineKeyboardButton(text="Wallet Management", callback_data="wallet_management")],
+    [InlineKeyboardButton(text="⚙️ Settings", callback_data="settings")],
     [InlineKeyboardButton(text="Help/FAQ", callback_data="help_faq")]
 ])
 
@@ -1010,6 +1055,17 @@ async def register_command(message: types.Message, app_context, state: FSMContex
                             "INSERT INTO users (telegram_id, public_key, referral_code) VALUES ($1, $2, $3)",
                             telegram_id, test_public, f"ref-api-{telegram_id}"
                         )
+                        
+                        # Save referral relationship if referrer_id exists
+                        if referrer_id:
+                            try:
+                                await conn.execute(
+                                    "INSERT INTO referrals (referrer_id, referee_id) VALUES ($1, $2)",
+                                    referrer_id, telegram_id
+                                )
+                                logger.info(f"Saved referral relationship: {referrer_id} -> {telegram_id}")
+                            except Exception as e:
+                                logger.warning(f"Failed to save referral relationship: {e}")
                     else:
                         await conn.execute(
                             "UPDATE users SET public_key = $1 WHERE telegram_id = $2",
@@ -1092,6 +1148,17 @@ async def process_referral_code(message: types.Message, state: FSMContext, app_c
                             "INSERT INTO users (telegram_id, public_key, referral_code) VALUES ($1, $2, $3)",
                             telegram_id, test_public, f"ref-api-{telegram_id}"
                         )
+                        
+                        # Save referral relationship if referrer_id exists
+                        if referrer_id:
+                            try:
+                                await conn.execute(
+                                    "INSERT INTO referrals (referrer_id, referee_id) VALUES ($1, $2)",
+                                    referrer_id, telegram_id
+                                )
+                                logger.info(f"Saved referral relationship: {referrer_id} -> {telegram_id}")
+                            except Exception as e:
+                                logger.warning(f"Failed to save referral relationship: {e}")
                     else:
                         await conn.execute(
                             "UPDATE users SET public_key = $1 WHERE telegram_id = $2",
@@ -2031,6 +2098,129 @@ async def process_remove_trustline_asset(message: types.Message, state: FSMConte
 async def process_wallet_management(app_context, callback: types.CallbackQuery):
     await process_wallet_management_callback(callback, app_context)       
 
+async def process_settings(callback: types.CallbackQuery, state: FSMContext, app_context):
+    """Handle settings menu display"""
+    await callback.answer()
+    
+    try:
+        # Get current user settings
+        current_slippage = await get_user_slippage(callback.from_user.id, app_context.db_pool)
+        current_custom_amount = await get_custom_amount(callback.from_user.id, app_context.db_pool)
+        
+        # Create settings text
+        settings_text = "⚙️ **Settings**\n\n"
+        
+        # Slippage setting
+        if current_slippage is not None:
+            settings_text += f"📊 **Slippage**: {current_slippage*100:.1f}% (Custom)\n"
+        else:
+            settings_text += f"📊 **Slippage**: {getattr(app_context, 'slippage', 0.05)*100:.1f}% (Default)\n"
+        
+        # Custom amount setting
+        if current_custom_amount is not None:
+            settings_text += f"💰 **Custom Buy Amount**: {current_custom_amount:.2f} XLM\n"
+        else:
+            settings_text += "💰 **Custom Buy Amount**: Not set\n"
+        
+        settings_text += "\n*Select an option to configure:*"
+        
+        # Create settings keyboard
+        keyboard = [
+            [InlineKeyboardButton(text="📊 Set Slippage", callback_data="set_slippage")],
+            [InlineKeyboardButton(text="💰 Set Custom Buy Amount", callback_data="set_custom_amount")],
+            [InlineKeyboardButton(text="🔄 Reset to Defaults", callback_data="reset_settings")],
+            [InlineKeyboardButton(text="⬅️ Back to Main Menu", callback_data="main_menu")]
+        ]
+        
+        settings_keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        
+        await callback.message.edit_text(
+            settings_text,
+            reply_markup=settings_keyboard,
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in settings menu: {e}")
+        await callback.message.edit_text(
+            "❌ Error loading settings. Please try again.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Back to Main Menu", callback_data="main_menu")]
+            ])
+        )
+
+async def process_slippage_input(message: types.Message, state: FSMContext, app_context):
+    """Handle slippage input from user"""
+    try:
+        slippage_input = message.text.strip()
+        
+        # Parse slippage input (accept both percentage and decimal)
+        if slippage_input.endswith('%'):
+            slippage_input = slippage_input[:-1]  # Remove % symbol
+        
+        try:
+            slippage_value = float(slippage_input)
+        except ValueError:
+            await message.reply("❌ Invalid slippage value. Please enter a number (e.g., 5 or 5%).")
+            return
+        
+        # Convert percentage to decimal if needed
+        if slippage_value > 1:  # Assume it's a percentage
+            slippage_value = slippage_value / 100
+        
+        # Validate range (0.1% to 50%)
+        if slippage_value < 0.001 or slippage_value > 0.5:
+            await message.reply("❌ Slippage must be between 0.1% and 50%. Please try again.")
+            return
+        
+        # Save slippage
+        await save_user_slippage(message.from_user.id, slippage_value, app_context.db_pool)
+        
+        # Check if we came from a buy/sell menu by looking at the state
+        state_data = await state.get_data()
+        source_menu = state_data.get('source_menu')
+        
+        if source_menu == 'buy':
+            # For buy menu, just send success message
+            asset_code = state_data.get('asset_code')
+            asset_issuer = state_data.get('asset_issuer')
+            if asset_code and asset_issuer:
+                await message.reply(
+                    f"✅ Slippage set to {slippage_value*100:.1f}%!\n\n"
+                    f"💡 **Tip:** Click the refresh button (🔄) in your buy menu to see the updated slippage display.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await message.reply(f"✅ Slippage set to {slippage_value*100:.1f}%!")
+        elif source_menu == 'sell':
+            # For sell menu, just send success message
+            asset_code = state_data.get('asset_code')
+            asset_issuer = state_data.get('asset_issuer')
+            if asset_code and asset_issuer:
+                await message.reply(
+                    f"✅ Slippage set to {slippage_value*100:.1f}%!\n\n"
+                    f"💡 **Tip:** Click the refresh button (🔄) in your sell menu to see the updated slippage display.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await message.reply(f"✅ Slippage set to {slippage_value*100:.1f}%!")
+        else:
+            # Default behavior for settings menu
+            await message.reply(
+                f"✅ Slippage set to {slippage_value*100:.1f}% successfully!\n\n"
+                "This will be used for all your buy and sell transactions.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Back to Settings", callback_data="settings")],
+                    [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu")]
+                ])
+            )
+        
+    except Exception as e:
+        logger.error(f"Error setting slippage: {e}")
+        await message.reply(f"❌ Error setting slippage: {str(e)}")
+    finally:
+        await state.clear()
+
 def register_main_handlers(dp, app_context, streaming_service):
     async def start_handler(message: types.Message, state: FSMContext):
         await start_command(message, app_context, streaming_service, state)
@@ -2060,7 +2250,7 @@ def register_main_handlers(dp, app_context, streaming_service):
         await handle_buy_menu_callback(callback, state, app_context)
     dp.callback_query.register(
         buy_menu_callback_handler,
-        lambda c: c.data.startswith("qb:") or c.data in ["ca", "rf", "back_to_main", "insufficient", "clear_ca"]
+        lambda c: c.data.startswith("qb:") or c.data in ["ca", "rf", "back_to_main", "insufficient", "clear_ca", "buy_set_slippage"]
     )
     
     # Asset processing handlers
@@ -2151,6 +2341,82 @@ def register_main_handlers(dp, app_context, streaming_service):
         await process_add_trustline_asset(message, state, app_context)
     dp.message.register(add_trustline_asset_handler, TrustlineStates.waiting_for_asset_to_add)
 
+    # Settings handlers
+    async def settings_handler(callback: types.CallbackQuery, state: FSMContext):
+        await process_settings(callback, state, app_context)
+    dp.callback_query.register(settings_handler, lambda c: c.data == "settings")
+
+    async def slippage_handler(message: types.Message, state: FSMContext):
+        await process_slippage_input(message, state, app_context)
+    dp.message.register(slippage_handler, SettingsStates.waiting_for_slippage)
+
+    # Settings sub-menu handlers
+    async def set_slippage_handler(callback: types.CallbackQuery, state: FSMContext):
+        await callback.answer()
+        await state.set_state(SettingsStates.waiting_for_slippage)
+        await callback.message.edit_text(
+            "📊 **Set Slippage**\n\n"
+            "Enter your preferred slippage percentage for trades.\n\n"
+            "**Examples:**\n"
+            "• `5` or `5%` = 5% slippage\n"
+            "• `2.5` or `2.5%` = 2.5% slippage\n"
+            "• `10` or `10%` = 10% slippage\n\n"
+            "**Range:** 0.1% to 50%\n\n"
+            "💡 *Lower slippage = better prices but higher chance of failed trades*\n"
+            "💡 *Higher slippage = more likely to succeed but potentially worse prices*\n\n"
+            "Enter your slippage percentage:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Back to Settings", callback_data="settings")]
+            ]),
+            parse_mode="Markdown"
+        )
+    dp.callback_query.register(set_slippage_handler, lambda c: c.data == "set_slippage")
+
+    async def set_custom_amount_handler(callback: types.CallbackQuery, state: FSMContext):
+        await callback.answer()
+        await state.set_state(BuySellStates.waiting_for_save_custom_amount)
+        await callback.message.edit_text(
+            "💰 **Set Custom Buy Amount**\n\n"
+            "Enter your preferred XLM amount for the custom buy button.\n\n"
+            "**Examples:**\n"
+            "• `150` = 150 XLM\n"
+            "• `75.5` = 75.5 XLM\n\n"
+            "Enter your custom XLM amount:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Back to Settings", callback_data="settings")]
+            ]),
+            parse_mode="Markdown"
+        )
+    dp.callback_query.register(set_custom_amount_handler, lambda c: c.data == "set_custom_amount")
+
+    async def reset_settings_handler(callback: types.CallbackQuery, state: FSMContext):
+        await callback.answer()
+        try:
+            # Clear user settings
+            await clear_user_slippage(callback.from_user.id, app_context.db_pool)
+            await clear_custom_amount(callback.from_user.id, app_context.db_pool)
+            
+            await callback.message.edit_text(
+                "🔄 **Settings Reset**\n\n"
+                "✅ Custom slippage cleared (using default 5%)\n"
+                "✅ Custom buy amount cleared\n\n"
+                "All settings have been reset to defaults.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Back to Settings", callback_data="settings")],
+                    [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu")]
+                ]),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Error resetting settings: {e}")
+            await callback.message.edit_text(
+                "❌ Error resetting settings. Please try again.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Back to Settings", callback_data="settings")]
+                ])
+            )
+    dp.callback_query.register(reset_settings_handler, lambda c: c.data == "reset_settings")
+
     async def remove_trustline_asset_handler(message: types.Message, state: FSMContext):
         await process_remove_trustline_asset(message, state, app_context)
     dp.message.register(remove_trustline_asset_handler, TrustlineStates.waiting_for_asset_to_remove)
@@ -2209,7 +2475,7 @@ def register_main_handlers(dp, app_context, streaming_service):
         await handle_sell_menu_callback(callback, state, app_context)
     dp.callback_query.register(
         sell_menu_callback_handler,
-        lambda c: c.data.startswith("sell_pct:") or c.data in ["sell_custom_pct", "sell_refresh", "sell_back_to_assets"]
+        lambda c: c.data.startswith("sell_pct:") or c.data in ["sell_custom_pct", "sell_refresh", "sell_back_to_assets", "sell_set_slippage"]
     )
     
     # Sell asset selection handlers
@@ -2323,8 +2589,9 @@ async def create_buy_menu_keyboard(asset_code: str, asset_issuer: str, available
     
     logger.info(f"Creating keyboard with amounts: {quick_amounts}, available XLM: {available_xlm}")
     
-    # Get user's saved custom amount
+    # Get user's saved custom amount and slippage
     custom_amount = await get_custom_amount(telegram_id, app_context.db_pool)
+    user_slippage = await get_user_slippage(telegram_id, app_context.db_pool)
     
     # Create keyboard rows
     keyboard_rows = []
@@ -2356,9 +2623,17 @@ async def create_buy_menu_keyboard(asset_code: str, asset_issuer: str, available
     if custom_amount:
         custom_button_text = f"✅ {custom_amount} XLM"
     
-    # Custom amount and navigation buttons
+    # Slippage button showing current setting
+    slippage_button_text = "⚙️ Slippage"
+    if user_slippage:
+        slippage_button_text = f"⚙️ {user_slippage*100:.1f}% Slippage"
+    else:
+        slippage_button_text = "⚙️ Default Slippage"
+    
+    # Custom amount and slippage buttons (2 per row)
     keyboard_rows.extend([
-        [InlineKeyboardButton(text=custom_button_text, callback_data="ca")]
+        [InlineKeyboardButton(text=custom_button_text, callback_data="ca"),
+         InlineKeyboardButton(text=slippage_button_text, callback_data="buy_set_slippage")]
     ])
     
     # Add clear custom amount button if there's a saved amount
@@ -2370,11 +2645,17 @@ async def create_buy_menu_keyboard(asset_code: str, asset_issuer: str, available
         [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")]
     ])
     
-    logger.info(f"Created keyboard with {len(keyboard_rows)} rows, custom amount: {custom_amount}")
+    logger.info(f"Created keyboard with {len(keyboard_rows)} rows, custom amount: {custom_amount}, slippage: {user_slippage}")
     return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
 async def handle_buy_menu_callback(callback: types.CallbackQuery, state: FSMContext, app_context):
     """Handle callbacks from the buy menu"""
+    # Answer the callback immediately to prevent timeout
+    try:
+        await callback.answer()
+    except Exception as answer_error:
+        logger.error(f"Could not answer callback: {answer_error}")
+    
     try:
         data = callback.data
         
@@ -2463,6 +2744,35 @@ async def handle_buy_menu_callback(callback: types.CallbackQuery, state: FSMCont
                     logger.error(f"Fallback error: {fallback_error}")
                     await callback.message.reply("❌ Error occurred. Please use /start to return to main menu.")
         
+        elif data == "buy_set_slippage":
+            # Handle slippage setting from buy menu
+            logger.info(f"Buy menu slippage button clicked for user {callback.from_user.id}")
+            
+            # Get current slippage
+            current_slippage = await get_user_slippage(callback.from_user.id, app_context.db_pool)
+            
+            if current_slippage:
+                slippage_display = f"{current_slippage*100:.1f}%"
+            else:
+                slippage_display = "Default (5%)"
+            
+            # Store source menu and asset info in state
+            state_data = await state.get_data()
+            await state.update_data(source_menu='buy', asset_code=state_data.get('asset_code'), asset_issuer=state_data.get('asset_issuer'))
+            
+            await callback.message.reply(
+                f"⚙️ **Current Slippage:** {slippage_display}\n\n"
+                f"Enter your preferred slippage percentage:\n\n"
+                f"**Examples:**\n"
+                f"• `2` (for 2%)\n"
+                f"• `0.5` (for 0.5%)\n"
+                f"• `10` (for 10%)\n\n"
+                f"💡 **Range:** 0.1% to 50%\n"
+                f"💡 **Tip:** Lower slippage = better prices, but may fail more often",
+                parse_mode="Markdown"
+            )
+            await state.set_state(SettingsStates.waiting_for_slippage)
+        
         elif data == "rf":
             # Refresh buy menu
             # Get asset info from state
@@ -2487,12 +2797,6 @@ async def handle_buy_menu_callback(callback: types.CallbackQuery, state: FSMCont
             await callback.message.reply(f"❌ Error processing menu action: {str(e)}")
         except Exception as reply_error:
             logger.error(f"Could not send error message: {reply_error}")
-    finally:
-        # Always answer the callback to prevent hanging
-        try:
-            await callback.answer()
-        except Exception as answer_error:
-            logger.error(f"Could not answer callback: {answer_error}")
 
 async def handle_quick_buy_xlm(callback: types.CallbackQuery, asset_code: str, asset_issuer: str, xlm_amount: float, app_context):
     """Handle quick buy with XLM amounts using PriceService for accurate calculations"""
@@ -2515,33 +2819,34 @@ async def handle_quick_buy_xlm(callback: types.CallbackQuery, asset_code: str, a
         # Delete processing message
         await processing_msg.delete()
         
-        # Success message
-        await callback.message.reply(
+        # Show success message as a separate message
+        success_msg = await callback.message.reply(
             f"✅ **Buy Successful!**\n\n"
             f"• Bought: {actual_amount_received:.7f} {asset_code}\n"
             f"• Spent: {actual_xlm_spent:.7f} XLM\n"
             f"• Fee: {actual_fee_paid:.7f} XLM ({fee_percentage:.2f}%)\n"
-            f"• Tx Hash: `{response['hash']}`",
+            f"• Tx Hash: `{response['hash']}`\n\n"
+            f"🔄 **Refreshing menu with updated balance...**",
             parse_mode="Markdown"
         )
         
-        # Delete the buy menu to clean up
-        try:
-            await callback.message.delete()
-        except Exception as e:
-            logger.warning(f"Could not delete buy menu: {e}")
+        # Refresh the buy menu with updated data
+        await refresh_buy_menu(callback, asset_code, asset_issuer, app_context)
         
-        # Return to main menu
-        dynamic_welcome = await get_welcome_text(callback.from_user.id, app_context)
-        await callback.message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        # Keep success message as transaction record (no longer auto-delete)
         
     except Exception as e:
         logger.error(f"Quick buy error: {str(e)}", exc_info=True)
-        await callback.message.reply(f"❌ Buy failed: {str(e)}")
         
-        # Return to main menu on error
-        dynamic_welcome = await get_welcome_text(callback.from_user.id, app_context)
-        await callback.message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        # Show error message but keep the buy menu open
+        error_msg = await callback.message.reply(
+            f"❌ **Buy Failed**\n\n"
+            f"Error: {str(e)}\n\n"
+            f"💡 **Tip:** Try refreshing the menu or check your balance.",
+            parse_mode="Markdown"
+        )
+        
+        # Keep error message for reference (no longer auto-delete)
 
 async def refresh_buy_menu(callback: types.CallbackQuery, asset_code: str, asset_issuer: str, app_context):
     """Refresh the buy menu with updated data"""
@@ -2612,7 +2917,7 @@ async def process_custom_amount(message: types.Message, state: FSMContext, app_c
         await save_custom_amount(message.from_user.id, xlm_amount, app_context.db_pool)
         
         # Success message
-        await message.reply(
+        success_msg = await message.reply(
             f"✅ **Buy Successful!**\n\n"
             f"• Bought: {actual_amount_received:.7f} {asset_code}\n"
             f"• Spent: {actual_xlm_spent:.7f} XLM\n"
@@ -2622,10 +2927,21 @@ async def process_custom_amount(message: types.Message, state: FSMContext, app_c
             parse_mode="Markdown"
         )
         
+        # Clear state and return to main menu after custom amount buy
+        await state.clear()
+        dynamic_welcome = await get_welcome_text(message.from_user.id, app_context)
+        await message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+        
     except Exception as e:
         logger.error(f"Custom amount buy error: {str(e)}", exc_info=True)
-        await message.reply(f"❌ Buy failed: {str(e)}")
-    finally:
+        error_msg = await message.reply(
+            f"❌ **Buy Failed**\n\n"
+            f"Error: {str(e)}\n\n"
+            f"💡 **Tip:** Try again with a different amount or check your balance.",
+            parse_mode="Markdown"
+        )
+        
+        # Clear state and return to main menu on error
         await state.clear()
         dynamic_welcome = await get_welcome_text(message.from_user.id, app_context)
         await message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
@@ -2743,7 +3059,7 @@ async def show_sell_menu(message: types.Message, asset_code: str, asset_issuer: 
     menu_text = create_sell_menu_text(asset_info, asset_code, asset_issuer, asset_balance, value_in_xlm, value_in_usd)
     
     # Create keyboard with percentage options
-    keyboard = create_sell_menu_keyboard(asset_code, asset_issuer, asset_balance)
+    keyboard = await create_sell_menu_keyboard(asset_code, asset_issuer, asset_balance, user_id, app_context)
     
     # Delete the asset selection menu to clean up the chat
     try:
@@ -2801,16 +3117,20 @@ def create_sell_menu_text(asset_info, asset_code: str, asset_issuer: str, asset_
             text += f"• Tags: {', '.join(display_tags)}\n"
     
     text += "\n**Select percentage to sell:**"
+    text += "\n\n💡 *Use ⬅️ Back to return to asset selection, or /start for main menu*"
     
     return text
 
-def create_sell_menu_keyboard(asset_code: str, asset_issuer: str, asset_balance: float) -> InlineKeyboardMarkup:
+async def create_sell_menu_keyboard(asset_code: str, asset_issuer: str, asset_balance: float, telegram_id: int, app_context) -> InlineKeyboardMarkup:
     """Create the keyboard for the sell menu with percentage options"""
     
     # Percentage options (10%, 25%, 50%, 100%)
     percentages = [10, 25, 50, 100]
     
     logger.info(f"Creating sell keyboard with percentages: {percentages}, balance: {asset_balance}")
+    
+    # Get user's slippage setting
+    user_slippage = await get_user_slippage(telegram_id, app_context.db_pool)
     
     # Create keyboard rows
     keyboard_rows = []
@@ -2831,9 +3151,16 @@ def create_sell_menu_keyboard(asset_code: str, asset_issuer: str, asset_balance:
                 logger.info(f"Creating sell button: {button_text}")
         keyboard_rows.append(row)
     
-    # Custom percentage button
-    keyboard_rows.append([
-        InlineKeyboardButton(text="💰 Custom %", callback_data="sell_custom_pct")
+    # Custom percentage and slippage buttons (2 per row)
+    slippage_button_text = "⚙️ Slippage"
+    if user_slippage:
+        slippage_button_text = f"⚙️ {user_slippage*100:.1f}% Slippage"
+    else:
+        slippage_button_text = "⚙️ Default Slippage"
+    
+    keyboard_rows.extend([
+        [InlineKeyboardButton(text="💰 Custom %", callback_data="sell_custom_pct"),
+         InlineKeyboardButton(text=slippage_button_text, callback_data="sell_set_slippage")]
     ])
     
     # Navigation buttons
@@ -2842,66 +3169,109 @@ def create_sell_menu_keyboard(asset_code: str, asset_issuer: str, asset_balance:
         [InlineKeyboardButton(text="⬅️ Back", callback_data="sell_back_to_assets")]
     ])
     
-    logger.info(f"Created sell keyboard with {len(keyboard_rows)} rows")
+    logger.info(f"Created sell keyboard with {len(keyboard_rows)} rows, slippage: {user_slippage}")
     return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
 async def handle_sell_menu_callback(callback: types.CallbackQuery, state: FSMContext, app_context):
     """Handle callbacks from the sell menu"""
-    data = callback.data
+    # Answer the callback immediately to prevent timeout
+    try:
+        await callback.answer()
+    except Exception as answer_error:
+        logger.error(f"Could not answer callback: {answer_error}")
     
-    if data.startswith("sell_pct:"):
-        # Handle percentage-based sell
-        _, percentage = data.split(":")
-        # Get asset info from state
-        state_data = await state.get_data()
-        asset_code = state_data.get('asset_code')
-        asset_issuer = state_data.get('asset_issuer')
+    try:
+        data = callback.data
         
-        if asset_code and asset_issuer:
-            await handle_percentage_sell(callback, asset_code, asset_issuer, int(percentage), app_context)
-        else:
-            await callback.message.reply("❌ Asset information not found. Please try again.")
-    
-    elif data == "sell_custom_pct":
-        # Handle custom percentage input
-        logger.info(f"Custom percentage button clicked for user {callback.from_user.id}")
+        if data.startswith("sell_pct:"):
+            # Handle percentage-based sell
+            _, percentage = data.split(":")
+            # Get asset info from state
+            state_data = await state.get_data()
+            asset_code = state_data.get('asset_code')
+            asset_issuer = state_data.get('asset_issuer')
+            
+            if asset_code and asset_issuer:
+                await handle_percentage_sell(callback, asset_code, asset_issuer, int(percentage), app_context)
+            else:
+                await callback.message.reply("❌ Asset information not found. Please try again.")
         
-        # Get asset info from state
-        state_data = await state.get_data()
-        asset_code = state_data.get('asset_code')
-        asset_issuer = state_data.get('asset_issuer')
+        elif data == "sell_custom_pct":
+            # Handle custom percentage input
+            logger.info(f"Custom percentage button clicked for user {callback.from_user.id}")
+            
+            # Get asset info from state
+            state_data = await state.get_data()
+            asset_code = state_data.get('asset_code')
+            asset_issuer = state_data.get('asset_issuer')
+            
+            logger.info(f"Asset info from state: {asset_code}:{asset_issuer}")
+            
+            if asset_code and asset_issuer:
+                await callback.message.reply(
+                    f"Enter the percentage of {asset_code} to sell:\n\n"
+                    f"**Example:** `25` (for 25%)\n\n"
+                    f"💡 **Tip:** Enter a number between 1 and 100!",
+                    parse_mode="Markdown"
+                )
+                await state.set_state(BuySellStates.waiting_for_sell_percentage)
+            else:
+                logger.error("Asset information not found in state")
+                await callback.message.reply("❌ Asset information not found. Please try again.")
         
-        logger.info(f"Asset info from state: {asset_code}:{asset_issuer}")
-        
-        if asset_code and asset_issuer:
+        elif data == "sell_set_slippage":
+            # Handle slippage setting from sell menu
+            logger.info(f"Sell menu slippage button clicked for user {callback.from_user.id}")
+            
+            # Get current slippage
+            current_slippage = await get_user_slippage(callback.from_user.id, app_context.db_pool)
+            
+            if current_slippage:
+                slippage_display = f"{current_slippage*100:.1f}%"
+            else:
+                slippage_display = "Default (5%)"
+            
+            # Store source menu and asset info in state
+            state_data = await state.get_data()
+            await state.update_data(source_menu='sell', asset_code=state_data.get('asset_code'), asset_issuer=state_data.get('asset_issuer'))
+            
             await callback.message.reply(
-                f"Enter the percentage of {asset_code} to sell:\n\n"
-                f"**Example:** `25` (for 25%)\n\n"
-                f"💡 **Tip:** Enter a number between 1 and 100!",
+                f"⚙️ **Current Slippage:** {slippage_display}\n\n"
+                f"Enter your preferred slippage percentage:\n\n"
+                f"**Examples:**\n"
+                f"• `2` (for 2%)\n"
+                f"• `0.5` (for 0.5%)\n"
+                f"• `10` (for 10%)\n\n"
+                f"💡 **Range:** 0.1% to 50%\n"
+                f"💡 **Tip:** Lower slippage = better prices, but may fail more often",
                 parse_mode="Markdown"
             )
-            await state.set_state(BuySellStates.waiting_for_sell_percentage)
-        else:
-            logger.error("Asset information not found in state")
-            await callback.message.reply("❌ Asset information not found. Please try again.")
-    
-    elif data == "sell_refresh":
-        # Refresh sell menu
-        # Get asset info from state
-        state_data = await state.get_data()
-        asset_code = state_data.get('asset_code')
-        asset_issuer = state_data.get('asset_issuer')
+            await state.set_state(SettingsStates.waiting_for_slippage)
         
-        if asset_code and asset_issuer:
-            await refresh_sell_menu(callback, asset_code, asset_issuer, app_context, callback.from_user.id)
-        else:
-            await callback.message.reply("❌ Asset information not found. Please try again.")
-    
-    elif data == "sell_back_to_assets":
-        # Return to asset selection
-        await show_sell_asset_selection(callback.message, app_context, state)
-    
-    await callback.answer()
+        elif data == "sell_refresh":
+            # Refresh sell menu
+            # Get asset info from state
+            state_data = await state.get_data()
+            asset_code = state_data.get('asset_code')
+            asset_issuer = state_data.get('asset_issuer')
+            
+            if asset_code and asset_issuer:
+                await refresh_sell_menu(callback, asset_code, asset_issuer, app_context, callback.from_user.id)
+            else:
+                await callback.message.reply("❌ Asset information not found. Please try again.")
+        
+        elif data == "sell_back_to_assets":
+            # Return to asset selection
+            await show_sell_asset_selection(callback.message, app_context, state, callback.from_user.id)
+        
+
+        
+    except Exception as e:
+        logger.error(f"Error in handle_sell_menu_callback: {str(e)}", exc_info=True)
+        try:
+            await callback.message.reply(f"❌ Error processing menu action: {str(e)}")
+        except Exception as reply_error:
+            logger.error(f"Could not send error message: {reply_error}")
 
 async def handle_percentage_sell(callback: types.CallbackQuery, asset_code: str, asset_issuer: str, percentage: int, app_context):
     """Handle percentage-based sell operations"""
@@ -2941,46 +3311,34 @@ async def handle_percentage_sell(callback: types.CallbackQuery, asset_code: str,
         # Delete processing message
         await processing_msg.delete()
         
-        # Success message
-        await callback.message.reply(
+        # Show success message as a separate message
+        success_msg = await callback.message.reply(
             f"✅ **Sell Successful!**\n\n"
             f"• Sold: {actual_amount_sent:.7f} {asset_code} ({percentage}%)\n"
             f"• Received: {actual_xlm_received:.7f} XLM\n"
             f"• Fee: {actual_fee_paid:.7f} XLM ({fee_percentage:.2f}%)\n"
-            f"• Tx Hash: `{response['hash']}`",
+            f"• Tx Hash: `{response['hash']}`\n\n"
+            f"🔄 **Refreshing menu with updated balance...**",
             parse_mode="Markdown"
         )
         
-        # Delete the sell menu to clean up
-        try:
-            await callback.message.delete()
-        except Exception as e:
-            # Suppress cleanup errors - they don't affect functionality
-            logger.debug(f"Could not delete sell menu (non-critical): {e}")
+        # Refresh the sell menu with updated data
+        await refresh_sell_menu(callback, asset_code, asset_issuer, app_context, user_id)
         
-        # Return to main menu
-        try:
-            dynamic_welcome = await get_welcome_text(user_id, app_context)
-            await callback.message.bot.send_message(callback.message.chat.id, dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Error returning to main menu: {e}")
-            # Fallback: just send a simple message
-            await callback.message.bot.send_message(callback.message.chat.id, "✅ Sell completed! Use /start to return to main menu.")
+        # Keep success message as transaction record (no longer auto-delete)
         
     except Exception as e:
         logger.error(f"Percentage sell error: {str(e)}", exc_info=True)
-        try:
-            await callback.message.bot.send_message(callback.message.chat.id, f"❌ Sell failed: {str(e)}")
-        except Exception as send_error:
-            logger.error(f"Could not send error message: {send_error}")
         
-        # Return to main menu on error
-        try:
-            dynamic_welcome = await get_welcome_text(callback.from_user.id, app_context)
-            await callback.message.bot.send_message(callback.message.chat.id, dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
-        except Exception as menu_error:
-            logger.error(f"Error returning to main menu: {menu_error}")
-            await callback.message.bot.send_message(callback.message.chat.id, "✅ Use /start to return to main menu.")
+        # Show error message but keep the sell menu open
+        error_msg = await callback.message.reply(
+            f"❌ **Sell Failed**\n\n"
+            f"Error: {str(e)}\n\n"
+            f"💡 **Tip:** Try refreshing the menu or check your balance.",
+            parse_mode="Markdown"
+        )
+        
+        # Keep error message for reference (no longer auto-delete)
 
 async def refresh_sell_menu(callback: types.CallbackQuery, asset_code: str, asset_issuer: str, app_context, user_id: int = None):
     """Refresh the sell menu with updated data"""
@@ -3016,7 +3374,7 @@ async def refresh_sell_menu(callback: types.CallbackQuery, asset_code: str, asse
         
         # Create updated menu
         menu_text = create_sell_menu_text(asset_info, asset_code, asset_issuer, asset_balance, value_in_xlm, value_in_usd)
-        keyboard = create_sell_menu_keyboard(asset_code, asset_issuer, asset_balance)
+        keyboard = await create_sell_menu_keyboard(asset_code, asset_issuer, asset_balance, user_id, app_context)
         
         # Update the message
         await callback.message.edit_text(menu_text, reply_markup=keyboard, parse_mode="Markdown")
@@ -3081,20 +3439,19 @@ async def process_custom_sell_percentage(message: types.Message, state: FSMConte
         
     except Exception as e:
         logger.error(f"Custom percentage sell error: {str(e)}", exc_info=True)
-        try:
-            await message.bot.send_message(message.chat.id, f"❌ Sell failed: {str(e)}")
-        except Exception as send_error:
-            logger.error(f"Could not send error message: {send_error}")
         
-        # Return to main menu on error
-        try:
-            dynamic_welcome = await get_welcome_text(message.from_user.id, app_context)
-            await message.bot.send_message(message.chat.id, dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
-        except Exception as menu_error:
-            logger.error(f"Error returning to main menu: {menu_error}")
-            await message.bot.send_message(message.chat.id, "✅ Use /start to return to main menu.")
+        # Show error message
+        error_msg = await message.reply(
+            f"❌ **Sell Failed**\n\n"
+            f"Error: {str(e)}\n\n"
+            f"💡 **Tip:** Try again or use the sell menu buttons.",
+            parse_mode="Markdown"
+        )
+        
+        # Keep error message for reference (no longer auto-delete)
     finally:
         await state.clear()
+        # Return to main menu after custom percentage sell
         dynamic_welcome = await get_welcome_text(message.from_user.id, app_context)
         await message.reply(dynamic_welcome, reply_markup=main_menu_keyboard, parse_mode="Markdown")
 

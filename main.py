@@ -404,6 +404,15 @@ async def init_db_pool():
                     ALTER TABLE users ADD COLUMN custom_amount DECIMAL(20,7) DEFAULT NULL;
                     COMMENT ON COLUMN users.custom_amount IS 'User''s preferred XLM amount for quick buy (in XLM, not asset amounts)';
                 END IF;
+                
+                -- Add user slippage column
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'slippage'
+                ) THEN
+                    ALTER TABLE users ADD COLUMN slippage DECIMAL(5,4) DEFAULT NULL;
+                    COMMENT ON COLUMN users.slippage IS 'User''s preferred slippage percentage (0.0001 to 0.9999, e.g., 0.0500 = 5%)';
+                END IF;
             END $$;
             
             -- Populate legacy_public_key for existing migrated users
